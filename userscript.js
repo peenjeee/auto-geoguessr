@@ -52,23 +52,22 @@
             return;
         }
 
-        // 2. Click the "PLACE RANGE" button from your PNJ Extension
-        const placeRangeBtn = document.querySelector('#btn-range') || findBtnExact('PLACE RANGE');
-
-        if (placeRangeBtn) {
-            console.log("Placing guess...");
-            placeRangeBtn.click();
+        // 2. Call the extension's built-in placement API directly!
+        // This completely bypasses the need for the panel or buttons to be open.
+        if (window.__pnjCmdPlace && window.__pnjState && window.__pnjState.current) {
+            console.log("Placing guess via API...");
+            window.__pnjCmdPlace(window.__pnjState.current, "nearby", { scoreRange: { min: 4500, max: 5000 } });
 
             // 3. Wait 0.8 seconds to allow the pin to be placed, then click GUESS
             setTimeout(() => {
                 const guessBtn = document.querySelector('[data-qa="perform-guess"]') ||
                     document.querySelector('.guess-map__guess-button') ||
                     findBtnExact('GUESS');
-                if (guessBtn) {
+                if (guessBtn && !guessBtn.disabled) {
                     console.log("Submitting guess!");
                     guessBtn.click();
                 }
-            }, 800); // 800ms delay
+            }, 800);
         }
     }, 2000);
 
