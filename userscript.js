@@ -8,6 +8,7 @@
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=geoguessr.com
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
+// @grant        GM_registerMenuCommand
 // @connect      localhost
 // @connect      127.0.0.1
 // @connect      gr.0xpnj.dev
@@ -42,6 +43,19 @@
     const DASHBOARD_URL = "https://gr.0xpnj.dev/";
     const USER_ID_KEY = "pnj_user_id";
     const userId = getUserId();
+
+    function togglePanelVisibility() {
+        const panel = document.getElementById("pnj-standalone-panel");
+        if (!panel) {
+            createUI();
+            return;
+        }
+        panel.hidden = !panel.hidden;
+    }
+
+    if (typeof GM_registerMenuCommand === "function") {
+        GM_registerMenuCommand("Hide / Show PNJ Panel", togglePanelVisibility);
+    }
 
     function generateUserId() {
         return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) =>
@@ -189,7 +203,7 @@
         const mapKey = `${coord.lat},${coord.lng}`;
 
         if (!maplibreMap) {
-            maplibreMap = new maplibregl.Map({
+            maplibreMap = new window.maplibregl.Map({
                 container: 'pnj-map-container',
                 style: 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json',
                 center: [coord.lng, coord.lat],
@@ -199,7 +213,7 @@
 
             const markerEl = createMapcnMarker();
 
-            maplibreMarker = new maplibregl.Marker({ element: markerEl, anchor: 'center' })
+            maplibreMarker = new window.maplibregl.Marker({ element: markerEl, anchor: 'center' })
                 .setLngLat([coord.lng, coord.lat])
                 .addTo(maplibreMap);
 
@@ -795,7 +809,9 @@
                 container.style.bottom = "auto";
             }
         });
-        document.addEventListener("mouseup", () => isDragging = false);
+        document.addEventListener("mouseup", () => {
+            isDragging = false;
+        });
 
         // Toggle UI
         document.getElementById("pnj-toggle-btn").addEventListener("click", () => {

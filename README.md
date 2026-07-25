@@ -5,6 +5,7 @@ Tampermonkey userscript for GeoGuessr. It reads the active round location, shows
 ## Features
 
 - **COPY ID**: copies the `pnj_user_id` used by the web resolver tools.
+- **Tampermonkey panel toggle**: use **Hide / Show PNJ Panel** from the script menu to hide or show the tools panel.
 - **Web telemetry**: sends the active round location to:
   - `http://localhost:3000/api/telemetry`
   - `https://gr.0xpnj.dev/api/telemetry`
@@ -35,6 +36,10 @@ Tampermonkey userscript for GeoGuessr. It reads the active round location, shows
 5. Open `https://gr.0xpnj.dev` or `http://localhost:3000`.
 6. Paste the copied ID and submit it.
 7. The resolver tools will show the map and location data for the active GeoGuessr round.
+
+## Hide or Show the Panel
+
+Open the Tampermonkey menu for **PNJ GeoGuessr Tools**, then click **Hide / Show PNJ Panel**.
 
 ## Data Flow
 
