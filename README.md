@@ -1,31 +1,45 @@
-# PNJ GeoGuessr Auto Bot
+# PNJ GeoGuessr Tools
 
-An automated standalone bot and Userscript helper to play GeoGuessr automatically, featuring an interactive control panel, map preview, and automated gameplay.
+Tampermonkey userscript for GeoGuessr. It reads the active round location, shows the PNJ tools panel, provides a **COPY ID** button, and sends round data to the PNJ web resolver tools.
 
 ## Features
 
-- **MapLibre GL / MapCN Map Engine**: WebGL vector map preview with CARTO Voyager light theme, smooth drag-to-pan, and scroll zoom without page zoom.
-- **Persistent Map Viewport**: Map position stays locked during the round and only resets when a new round location loads.
-- **Protected Location Pin**: Network request filter prevents map zoom and pan in GeoGuessr from altering the location pin.
-- **Independent Score Range Inputs**: Independent min/max score range inputs (0 - 5000) with smooth dual-range sliders.
-- **Auto Bot Mode**: Automatically places guesses and clicks Next Round / Play Again buttons.
+- **COPY ID**: copies the `pnj_user_id` used by the web resolver tools.
+- **Web telemetry**: sends the active round location to:
+  - `http://localhost:3000/api/telemetry`
+  - `https://gr.0xpnj.dev/api/telemetry`
+- **Map preview**: shows a preview of the active round location.
+- **Place exact / range**: places an exact pin or a range-based pin.
+- **Auto Bot Mode**: automatically places guesses and continues rounds.
 
 ## Requirements
 
 - A modern desktop browser (Brave, Chrome, Edge, etc.)
 - **Tampermonkey** or **Violentmonkey** extension installed.
+- PNJ web resolver tools running on `http://localhost:3000` or deployed at `https://gr.0xpnj.dev`.
 
 ## Installation Guide
 
-1. Open Tampermonkey in your browser.
+1. Open **Tampermonkey** or **Violentmonkey** extension.
 2. Select **"Create a new script..."**.
 3. Open `userscript.js` in this repository and copy all of its code.
-4. Paste it into the Tampermonkey editor, replacing default code.
+4. Paste it into the **Tampermonkey** or **Violentmonkey** editor, replacing default code.
 5. Save the script (`Ctrl+S`).
 
 ## How to Use
 
 1. Open [GeoGuessr](https://www.geoguessr.com/).
-2. Start a game in **Classic** mode (Singleplayer).
+2. Start a GeoGuessr round.
 3. The PNJ GeoGuessr Tools panel will appear on your screen.
-4. Click **PLACE EXACT** or **PLACE RANGE** to drop pins, or toggle **AUTO BOT** for continuous background play.
+4. Click **COPY ID**.
+5. Open `https://gr.0xpnj.dev` or `http://localhost:3000`.
+6. Paste the copied ID and submit it.
+7. The resolver tools will show the map and location data for the active GeoGuessr round.
+
+## Data Flow
+
+```text
+GeoGuessr round -> userscript reads coord -> sends telemetry with pnj_user_id -> PNJ web resolver tools
+```
+
+The same `pnj_user_id` is stored in browser `localStorage`, so the web resolver tools can show data for the copied ID.

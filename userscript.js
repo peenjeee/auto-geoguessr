@@ -7,7 +7,10 @@
 // @match        https://www.geoguessr.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=geoguessr.com
 // @run-at       document-start
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      localhost
+// @connect      127.0.0.1
+// @connect      gr.0xpnj.dev
 // ==/UserScript==
 
 (function () {
@@ -35,10 +38,90 @@
     if (!state.maxScore || state.maxScore <= 0) state.maxScore = 5000;
 
     let lastMapKey = "";
+    const TELEMETRY_URLS = ["http://localhost:3000/api/telemetry", "https://gr.0xpnj.dev/api/telemetry"];
+    const DASHBOARD_URL = "https://gr.0xpnj.dev/";
+    const USER_ID_KEY = "pnj_user_id";
+    const userId = getUserId();
+
+    function generateUserId() {
+        return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) =>
+            (+c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> +c / 4).toString(16)
+        ).toUpperCase();
+    }
+
+    function getUserId() {
+        let id = localStorage.getItem(USER_ID_KEY);
+        if (id) return id.trim().toUpperCase();
+        id = generateUserId();
+        localStorage.setItem(USER_ID_KEY, id);
+        window.open(`${DASHBOARD_URL}?id=${id}`, "_blank");
+        return id;
+    }
+
+    function copyUserId() {
+        if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(userId);
+        const input = document.createElement("input");
+        input.value = userId;
+        document.body.appendChild(input);
+        input.select();
+        document.execCommand("copy");
+        input.remove();
+        return Promise.resolve();
+    }
+
+    let cleanFetch;
+    function sendFetch(url, options) {
+        if (!cleanFetch) {
+            const frame = document.createElement("iframe");
+            frame.style.display = "none";
+            frame.src = "about:blank";
+            (document.body || document.documentElement).appendChild(frame);
+            cleanFetch = frame.contentWindow.fetch.bind(frame.contentWindow);
+        }
+        return cleanFetch(url, options);
+    }
 
     // ----------------------------------------------------
     // Coordinates Extraction & Hooking
     // ----------------------------------------------------
+    function broadcastToWeb(coord, targetScore = 5000, distanceKm = 0) {
+        const payload = JSON.stringify({
+            type: "round_update",
+            userId,
+            lat: coord.lat,
+            lng: coord.lng,
+            targetScore: targetScore,
+            distanceKm: distanceKm
+        });
+
+        TELEMETRY_URLS.forEach((url) => {
+            if (typeof GM_xmlhttpRequest === "function") {
+                try {
+                    GM_xmlhttpRequest({
+                        method: "POST",
+                        url,
+                        headers: { "Content-Type": "application/json" },
+                        data: payload
+                    });
+                } catch (e) { }
+            } else {
+                try {
+                    sendFetch(url, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: payload
+                    }).catch(() => {});
+                } catch (e) { }
+            }
+        });
+
+        try {
+            const channel = new BroadcastChannel("pnj_geoguessr_channel");
+            channel.postMessage(JSON.parse(payload));
+            channel.close();
+        } catch (e) { }
+    }
+
     function rememberLocation(coord) {
         if (!coord || typeof coord.lat !== "number" || typeof coord.lng !== "number") return;
         if (Math.abs(coord.lat) > 90 || Math.abs(coord.lng) > 180 || (coord.lat === 0 && coord.lng === 0)) return;
@@ -50,6 +133,7 @@
         if (state.locations.length > 20) state.locations.shift();
 
         updateMapFrame(coord);
+        broadcastToWeb(coord);
     }
 
     let maplibreMap = null;
@@ -666,6 +750,7 @@
                 <button id="pnj-btn-autobot" class="pnj-btn pnj-btn-autobot ${state.autoBot ? 'on' : ''}">
                     AUTO BOT: ${state.autoBot ? 'ON' : 'OFF'}
                 </button>
+                <button id="pnj-btn-copy-id" class="pnj-btn">COPY ID</button>
                 <button id="pnj-btn-exact" class="pnj-btn">PLACE EXACT</button>
 
                 <div class="pnj-card">
@@ -683,6 +768,8 @@
                     </div>
                     <button id="pnj-btn-range" class="pnj-btn" style="margin-bottom: 0;">PLACE RANGE</button>
                 </div>
+
+                <button id="pnj-btn-refresh" class="pnj-btn">REFRESH MAP</button>
 
                 <div id="pnj-map-panel" class="pnj-map-card" hidden>
                     <div id="pnj-map-container"></div>
@@ -834,6 +921,18 @@
 
         document.getElementById("pnj-btn-exact").addEventListener("click", () => placeGuessOnMap("exact"));
         document.getElementById("pnj-btn-range").addEventListener("click", () => placeGuessOnMap("nearby"));
+        document.getElementById("pnj-btn-refresh").addEventListener("click", () => {
+            const coord = getCurrentCoord();
+            if (coord) updateMapFrame(coord);
+        });
+        document.getElementById("pnj-btn-copy-id").addEventListener("click", (event) => {
+            const coord = getCurrentCoord();
+            if (coord) broadcastToWeb(coord);
+            copyUserId().then(() => {
+                event.currentTarget.textContent = "COPIED";
+                setTimeout(() => { event.currentTarget.textContent = "COPY ID"; }, 900);
+            });
+        });
 
         const botBtn = document.getElementById("pnj-btn-autobot");
         botBtn.addEventListener("click", () => {
@@ -859,8 +958,10 @@
 
     setInterval(() => {
         const c = getCurrentCoord();
-        if (c && !state.current) {
-            rememberLocation(c);
+        if (c) {
+            if (!state.current || Math.abs(state.current.lat - c.lat) > 0.0001 || Math.abs(state.current.lng - c.lng) > 0.0001) {
+                rememberLocation(c);
+            }
         }
 
         if (!state.autoBot) return;
