@@ -204,6 +204,37 @@
     setInterval(patchStreetView, 1000);
 
     // Network Hooking
+    function distanceKm(lat1, lng1, lat2, lng2) {
+        const r = 6371;
+        const p = Math.PI / 180;
+        const a = 0.5 - Math.cos((lat2 - lat1) * p) / 2
+            + Math.cos(lat1 * p) * Math.cos(lat2 * p) *
+            (1 - Math.cos((lng2 - lng1) * p)) / 2;
+        return 2 * r * Math.asin(Math.sqrt(a));
+    }
+
+    function extractBounds(obj, depth = 0) {
+        if (depth > 10 || !obj || typeof obj !== "object") return null;
+        if (obj.min && obj.max && Number.isFinite(obj.min.lat) && Number.isFinite(obj.max.lat)) {
+            return obj;
+        }
+        if (obj.bounds && obj.bounds.min && obj.bounds.max && Number.isFinite(obj.bounds.min.lat)) {
+            return obj.bounds;
+        }
+        if (Array.isArray(obj)) {
+            for (let i = 0; i < obj.length; i++) {
+                const found = extractBounds(obj[i], depth + 1);
+                if (found) return found;
+            }
+        } else {
+            for (const key of Object.keys(obj)) {
+                const found = extractBounds(obj[key], depth + 1);
+                if (found) return found;
+            }
+        }
+        return null;
+    }
+
     function inspectText(text) {
         if (!text || typeof text !== 'string') return;
         try {
@@ -217,6 +248,11 @@
             }
             if (text.startsWith('{') || text.startsWith('[')) {
                 const json = JSON.parse(text);
+                const bounds = extractBounds(json);
+                if (bounds && bounds.min && bounds.max) {
+                    const diagonal = distanceKm(bounds.min.lat, bounds.min.lng, bounds.max.lat, bounds.max.lng);
+                    state.mapScale = diagonal > 15000 ? 1492.7 : Math.max(5, diagonal / 10);
+                }
                 findCoordsInObj(json);
             }
         } catch (e) { }
@@ -274,7 +310,7 @@
         const targetScore = low + Math.random() * (high - low);
         const earthRadiusKm = 6371;
         const scoreScaleKm = state.mapScale || 1492.7;
-        const distanceKm = targetScore > 0 ? -scoreScaleKm * Math.log(targetScore / 5000) : scoreScaleKm * 10;
+        const distanceKm = targetScore >= 4999 ? 0 : -scoreScaleKm * Math.log(targetScore / 5000);
         const bearing = Math.random() * Math.PI * 2;
         const startLat = (coord.lat * Math.PI) / 180;
         const startLng = (coord.lng * Math.PI) / 180;
@@ -659,31 +695,27 @@
         const sliderMax = document.getElementById("pnj-slider-max");
         const sliderBox = document.getElementById("pnj-slider-box");
 
-        function nearbyScoreRange() {
-            let minVal = sliderMin ? Number(sliderMin.value) : 4500;
-            let maxVal = sliderMax ? Number(sliderMax.value) : 5000;
+        function updateNearbyValue(source = null) {
+            let minVal = Number(minInp?.value ?? (sliderMin?.value || 4500));
+            let maxVal = Number(maxInp?.value ?? (sliderMax?.value || 5000));
 
-            if (isNaN(minVal) || minVal <= 0) minVal = 4500;
-            if (isNaN(maxVal) || maxVal <= 0) maxVal = 5000;
+            if (isNaN(minVal)) minVal = 4500;
+            if (isNaN(maxVal)) maxVal = 5000;
 
-            let min = Math.max(0, Math.min(5000, minVal));
-            let max = Math.max(0, Math.min(5000, maxVal));
-            return { min: Math.min(min, max), max: Math.max(min, max) };
-        }
+            state.minScore = Math.max(0, Math.min(5000, minVal));
+            state.maxScore = Math.max(0, Math.min(5000, maxVal));
 
-        function updateNearbyValue(isFromNumberBox = false) {
-            const range = nearbyScoreRange();
-            state.minScore = range.min;
-            state.maxScore = range.max;
+            const displayMin = Math.min(state.minScore, state.maxScore);
+            const displayMax = Math.max(state.minScore, state.maxScore);
 
             if (sliderBox) {
-                sliderBox.style.setProperty("--range-left", `${(range.min / 5000) * 100}%`);
-                sliderBox.style.setProperty("--range-right", `${(range.max / 5000) * 100}%`);
+                sliderBox.style.setProperty("--range-left", `${displayMin / 50}%`);
+                sliderBox.style.setProperty("--range-right", `${displayMax / 50}%`);
             }
 
-            if (!isFromNumberBox) {
-                if (minInp) minInp.value = range.min;
-                if (maxInp) maxInp.value = range.max;
+            if (source === "slider") {
+                if (minInp) minInp.value = state.minScore;
+                if (maxInp) maxInp.value = state.maxScore;
             }
         }
 
@@ -694,19 +726,21 @@
             return Math.round((percent * 5000) / 50) * 50;
         }
 
+        function moveRangeHandle(handle, score) {
+            if (handle === sliderMin) {
+                sliderMin.value = Math.min(score, Number(sliderMax.value));
+                if (minInp) minInp.value = sliderMin.value;
+            } else {
+                sliderMax.value = Math.max(score, Number(sliderMin.value));
+                if (maxInp) maxInp.value = sliderMax.value;
+            }
+            updateNearbyValue("slider");
+        }
+
         function nearestRangeHandle(score) {
             return Math.abs(score - Number(sliderMin.value)) <= Math.abs(score - Number(sliderMax.value))
                 ? sliderMin
                 : sliderMax;
-        }
-
-        function moveRangeHandle(handle, score) {
-            if (handle === sliderMin) {
-                sliderMin.value = Math.min(score, Number(sliderMax.value));
-            } else {
-                sliderMax.value = Math.max(score, Number(sliderMin.value));
-            }
-            updateNearbyValue();
         }
 
         let draggedRangeHandle = null;
@@ -743,55 +777,26 @@
         }
 
         if (minInp && maxInp) {
-            const clampStrict = (val, isMax = false) => {
-                if (val === "" || val === null || isNaN(Number(val))) return isMax ? 5000 : 0;
-                let num = Number(val);
-                if (num < 0) return 0;
-                if (num > 5000) return 5000;
-                return num;
-            };
-
-            const handleNumberInput = () => {
-                let min = clampStrict(minInp.value, false);
-                let max = clampStrict(maxInp.value, true);
-
-                if (min > max) {
-                    const temp = min;
-                    min = max;
-                    max = temp;
-                }
-
-                minInp.value = min;
-                maxInp.value = max;
-                if (sliderMin) sliderMin.value = min;
-                if (sliderMax) sliderMax.value = max;
-                updateNearbyValue(true);
-            };
-
-            minInp.addEventListener("input", () => {
-                if (Number(minInp.value) > 5000) minInp.value = 5000;
-                if (Number(minInp.value) < 0) minInp.value = 0;
-                handleNumberInput();
-            });
-            maxInp.addEventListener("input", () => {
-                if (Number(maxInp.value) > 5000) maxInp.value = 5000;
-                if (Number(maxInp.value) < 0) maxInp.value = 0;
-                handleNumberInput();
-            });
-
-            // Stop propagation of keyboard events to prevent triggering GeoGuessr Emoji shortcuts
             const stopPropagationHandler = (e) => {
                 e.stopPropagation();
-                if (e.key === "Enter") {
-                    handleNumberInput();
-                    e.target.blur();
-                }
             };
 
             [minInp, maxInp].forEach(inp => {
                 inp.addEventListener("keydown", stopPropagationHandler);
                 inp.addEventListener("keyup", stopPropagationHandler);
                 inp.addEventListener("keypress", stopPropagationHandler);
+            });
+
+            minInp.addEventListener("input", () => {
+                let val = Math.max(0, Math.min(5000, Number(minInp.value)));
+                if (sliderMin) sliderMin.value = val;
+                updateNearbyValue("input");
+            });
+
+            maxInp.addEventListener("input", () => {
+                let val = Math.max(0, Math.min(5000, Number(maxInp.value)));
+                if (sliderMax) sliderMax.value = val;
+                updateNearbyValue("input");
             });
         }
 
