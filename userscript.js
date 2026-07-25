@@ -54,8 +54,15 @@
     }
 
     if (typeof GM_registerMenuCommand === "function") {
-        GM_registerMenuCommand("Hide / Show PNJ Panel", togglePanelVisibility);
+        GM_registerMenuCommand("Hide / Show PNJ Panel (Insert)", togglePanelVisibility);
     }
+
+    window.addEventListener("keydown", (event) => {
+        if (event.key !== "Insert" || event.repeat) return;
+        const target = event.target;
+        if (target && /input|textarea|select/i.test(target.tagName)) return;
+        togglePanelVisibility();
+    });
 
     function generateUserId() {
         return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) =>
