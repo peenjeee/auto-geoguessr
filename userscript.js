@@ -102,6 +102,8 @@
             return;
         }
 
+        const mapKey = `${coord.lat},${coord.lng}`;
+
         if (!maplibreMap) {
             maplibreMap = new maplibregl.Map({
                 container: 'pnj-map-container',
@@ -117,13 +119,15 @@
                 .setLngLat([coord.lng, coord.lat])
                 .addTo(maplibreMap);
 
+            lastMapKey = mapKey;
             setTimeout(() => maplibreMap.resize(), 300);
-        } else {
+        } else if (mapKey !== lastMapKey) {
             maplibreMap.setCenter([coord.lng, coord.lat]);
             maplibreMap.setZoom(7);
             if (maplibreMarker) {
                 maplibreMarker.setLngLat([coord.lng, coord.lat]);
             }
+            lastMapKey = mapKey;
             setTimeout(() => maplibreMap.resize(), 100);
         }
     }
@@ -235,7 +239,7 @@
         return null;
     }
 
-    function inspectText(text) {
+    function inspectGoogleMapsText(text) {
         if (!text || typeof text !== 'string') return;
         try {
             const matches = text.matchAll(/-?\d+\.\d+,\s*-?\d+\.\d+/g);
@@ -246,6 +250,17 @@
                     return;
                 }
             }
+        } catch (e) { }
+    }
+
+    function inspectText(text, url = "") {
+        if (!text || typeof text !== 'string') return;
+        const urlLower = url.toLowerCase();
+
+        // Ignore map tiles, viewports, bounds, or guesses to prevent map zoom/pan from changing location pin
+        if (/bounds|viewport|mapbounds|tile|vt\/|staticmap|guess/.test(urlLower)) return;
+
+        try {
             if (text.startsWith('{') || text.startsWith('[')) {
                 const json = JSON.parse(text);
                 const bounds = extractBounds(json);
@@ -279,18 +294,33 @@
 
     const origFetch = window.fetch;
     window.fetch = async function (...args) {
+        const input = args[0];
+        const url = typeof input === "string" ? input : (input && input.url ? input.url : "");
         const res = await origFetch.apply(this, args);
+
         try {
             const clone = res.clone();
-            clone.text().then(text => inspectText(text));
+            if (url.includes("maps.googleapis.com") && (url.includes("GetMetadata") || url.includes("SingleImageSearch"))) {
+                clone.text().then(text => inspectGoogleMapsText(text));
+            } else if (url.includes("/api/") || url.includes("geoguessr.com")) {
+                clone.text().then(text => inspectText(text, url));
+            }
         } catch (e) { }
+
         return res;
     };
 
     const origXHR = window.XMLHttpRequest.prototype.open;
     window.XMLHttpRequest.prototype.open = function (...args) {
+        const url = String(args[1] || "");
         this.addEventListener('load', function () {
-            try { inspectText(this.responseText); } catch (e) { }
+            try {
+                if (url.includes("maps.googleapis.com") && (url.includes("GetMetadata") || url.includes("SingleImageSearch"))) {
+                    inspectGoogleMapsText(this.responseText);
+                } else if (url.includes("/api/") || url.includes("geoguessr.com")) {
+                    inspectText(this.responseText, url);
+                }
+            } catch (e) { }
         });
         return origXHR.apply(this, args);
     };
