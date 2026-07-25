@@ -21,9 +21,9 @@ Tampermonkey userscript for GeoGuessr. It reads the active round location, shows
 
 ## Related Projects
 
-- [peenjeee/geoguessr-reverse-engineering](https://github.com/peenjeee/geoguessr-reverse-engineering) - browser extension version of PNJ GeoGuessr Tools.
-- [peenjeee/geoguessr-challenge](https://github.com/peenjeee/geoguessr-challenge) - collection of free GeoGuessr challenge links.
-- [peenjeee/geoguessr-web](https://github.com/peenjeee/geoguessr-web) - PNJ web resolver tools.
+- [https://geo.0xpnj.dev](https://geo.0xpnj.dev) - browser extension version of PNJ GeoGuessr Tools.
+- [https://gc.0xpnj.dev](https://gc.0xpnj.dev) - collection of free GeoGuessr challenge links.
+- [https://gr.0xpnj.dev](https://gr.0xpnj.dev) - PNJ web resolver tools.
 
 ## Installation Guide
 
