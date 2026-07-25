@@ -19,6 +19,12 @@ Tampermonkey userscript for GeoGuessr. It reads the active round location, shows
 - **Tampermonkey** or **Violentmonkey** extension installed.
 - PNJ web resolver tools running on `http://localhost:3000` or deployed at `https://gr.0xpnj.dev`.
 
+## Related Projects
+
+- [peenjeee/geoguessr-reverse-engineering](https://github.com/peenjeee/geoguessr-reverse-engineering) - browser extension version of PNJ GeoGuessr Tools.
+- [peenjeee/geoguessr-challenge](https://github.com/peenjeee/geoguessr-challenge) - collection of free GeoGuessr challenge links.
+- [peenjeee/geoguessr-web](https://github.com/peenjeee/geoguessr-web) - PNJ web resolver tools.
+
 ## Installation Guide
 
 1. Open **Tampermonkey** or **Violentmonkey** extension.
