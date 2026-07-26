@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PNJ GeoGuessr Tools
 // @namespace    http://tampermonkey.net/
-// @version      7.0
+// @version      7.2
 // @description  Full-featured GeoGuessr helper.
 // @author       Peenjeee
 // @match        https://www.geoguessr.com/*
@@ -23,12 +23,16 @@
 (function () {
     'use strict';
 
-    console.log("PNJ GeoGuessr Userscript v7.0 Loaded!");
+    console.log("PNJ GeoGuessr Userscript v7.2 Loaded!");
 
     try {
         localStorage.removeItem("pnj_rnd_loc");
         localStorage.removeItem("pnj_auto_bot");
     } catch (e) { }
+
+    // Longer than any single Street View hop, shorter than the gap between rounds even on
+    // city-sized maps, so it separates "the player walked" from "a new round started".
+    const WALK_STEP_KM = 1;
 
     const savedScoreRange = loadScoreRange();
     const state = (window.__pnjState = window.__pnjState || {
@@ -36,6 +40,7 @@
         current: null,
         currentQuality: 0,
         currentAt: 0,
+        lastGoogleCoord: null,
         autoBot: false,
         mapScale: null,
         minScore: savedScoreRange.min,
@@ -187,6 +192,14 @@
         } catch (e) { }
     }
 
+    // Released when a round ends so the next round can be captured even if its
+    // panorama hook misses; without this a stuck high-quality fix would block every
+    // weaker source forever.
+    function resetRoundLock() {
+        state.currentQuality = 0;
+        state.lastGoogleCoord = null;
+    }
+
     function isJunkCoord(lat, lng) {
         if (!Number.isFinite(lat) || !Number.isFinite(lng)) return true;
         if (Math.abs(lat) > 85 || Math.abs(lng) > 180) return true;
@@ -200,7 +213,27 @@
         if (isJunkCoord(coord.lat, coord.lng)) return;
 
         const now = Date.now();
-        if (quality < (state.currentQuality || 0) && now - (state.currentAt || 0) < 45000) return;
+        // The round's location never changes, so once a panorama or anchored fix is in,
+        // weaker sources stay locked out for the whole round. Map pans and zooms fire
+        // MapsJsInternalService RPCs carrying viewport coordinates; without this lock
+        // they would drag the pin to whatever the player is looking at.
+        if (quality < (state.currentQuality || 0)) return;
+
+        // Track where the panorama actually is, separately from what the pin shows.
+        const previous = state.lastGoogleCoord;
+        state.lastGoogleCoord = { lat: coord.lat, lng: coord.lng };
+
+        // Walking arrives as a chain of short hops; a new round teleports far away. Measuring
+        // each hop against the PREVIOUS position — not against the round's first fix — keeps
+        // the pin on the answer however far the player walks, while still accepting the next
+        // round instantly, even on maps whose rounds sit close together.
+        if (previous && quality === (state.currentQuality || 0)) {
+            const step = distanceKm(previous.lat, previous.lng, coord.lat, coord.lng);
+            if (step < WALK_STEP_KM) {
+                state.currentAt = now;
+                return;
+            }
+        }
 
         state.current = coord;
         state.currentQuality = quality;
@@ -568,12 +601,17 @@
         const input = args[0];
         const url = typeof input === "string" ? input : (input && input.url ? input.url : "");
         const res = await origFetch.apply(this, args);
+        // Clone ONLY what we actually read. An unread clone keeps a full duplicate of the
+        // body buffered for the response's lifetime, and tiles/images/styles flow through
+        // here constantly — cloning them all leaks memory across a long session.
         try {
-            const clone = res.clone();
-            if (url.includes("maps.googleapis.com") && (url.includes("GetMetadata") || url.includes("SingleImageSearch"))) {
-                clone.text().then(text => extractFromGoogleMaps(text));
-            } else if (url.includes("/api/") || url.includes("geoguessr.com")) {
-                clone.text().then(text => extractFromJsonResponse(text, url));
+            const isPano = url.includes("maps.googleapis.com") &&
+                (url.includes("GetMetadata") || url.includes("SingleImageSearch"));
+            const isGeoApi = !isPano && (url.includes("/api/") || url.includes("geoguessr.com"));
+            if (isPano) {
+                res.clone().text().then(text => extractFromGoogleMaps(text)).catch(() => { });
+            } else if (isGeoApi) {
+                res.clone().text().then(text => extractFromJsonResponse(text, url)).catch(() => { });
             }
         } catch (e) { }
         return res;
@@ -1174,6 +1212,9 @@
         return null;
     }
 
+    let roundOverSeen = false;
+    let lastPath = location.pathname;
+
     setInterval(() => {
         const c = getCurrentCoord();
         if (c) {
@@ -1182,11 +1223,31 @@
             }
         }
 
+        const roundOver = document.querySelector('[data-qa="close-round-result"]') ||
+            document.querySelector('[data-qa="play-next-round"]');
+
+        // Release the lock when the result screen CLOSES, never while it is up: GeoGuessr
+        // animates a map on that screen, and an open gate there would let its viewport
+        // coordinates overwrite the round location we just protected.
+        if (roundOver) {
+            roundOverSeen = true;
+        } else if (roundOverSeen) {
+            roundOverSeen = false;
+            resetRoundLock();
+        }
+
+        // Game summaries, lobbies and duels end without those buttons, so also release on
+        // SPA navigation, and drop the map scale so a new map re-measures its own bounds.
+        if (location.pathname !== lastPath) {
+            lastPath = location.pathname;
+            roundOverSeen = false;
+            resetRoundLock();
+            state.mapScale = null;
+        }
+
         if (!state.autoBot) return;
 
-        const nextBtn = document.querySelector('[data-qa="close-round-result"]') ||
-            document.querySelector('[data-qa="play-next-round"]') ||
-            findBtnPartial(['NEXT', 'AGAIN', 'SUMMARY']);
+        const nextBtn = roundOver || findBtnPartial(['NEXT', 'AGAIN', 'SUMMARY']);
 
         if (nextBtn) {
             nextBtn.click();
