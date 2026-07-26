@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PNJ GeoGuessr Tools
 // @namespace    http://tampermonkey.net/
-// @version      6.0
+// @version      7.0
 // @description  Full-featured GeoGuessr helper.
 // @author       Peenjeee
 // @match        https://www.geoguessr.com/*
@@ -23,13 +23,14 @@
 (function () {
     'use strict';
 
-    console.log("PNJ GeoGuessr Userscript v6.0 Loaded!");
+    console.log("PNJ GeoGuessr Userscript v7.0 Loaded!");
 
     try {
         localStorage.removeItem("pnj_rnd_loc");
         localStorage.removeItem("pnj_auto_bot");
     } catch (e) { }
 
+    const savedScoreRange = loadScoreRange();
     const state = (window.__pnjState = window.__pnjState || {
         locations: [],
         current: null,
@@ -37,12 +38,12 @@
         currentAt: 0,
         autoBot: false,
         mapScale: null,
-        minScore: 4500,
-        maxScore: 5000
+        minScore: savedScoreRange.min,
+        maxScore: savedScoreRange.max
     });
 
-    if (!state.minScore || state.minScore < 0) state.minScore = 4500;
-    if (!state.maxScore || state.maxScore <= 0) state.maxScore = 5000;
+    if (!Number.isFinite(state.minScore) || state.minScore < 0) state.minScore = savedScoreRange.min;
+    if (!Number.isFinite(state.maxScore) || state.maxScore <= 0) state.maxScore = savedScoreRange.max;
 
     let lastMapKey = "";
     const TELEMETRY_URLS = ["http://localhost:3000/api/telemetry", "https://gr.0xpnj.dev/api/telemetry"];
@@ -168,6 +169,24 @@
         } catch (e) { }
     }
 
+    function loadScoreRange() {
+        try {
+            const stored = JSON.parse(localStorage.getItem("pnj_score_range") || "null");
+            const min = Math.max(0, Math.min(5000, Number(stored?.min)));
+            const max = Math.max(0, Math.min(5000, Number(stored?.max)));
+            if (Number.isFinite(min) && Number.isFinite(max)) {
+                return { min: Math.min(min, max), max: Math.max(min, max) };
+            }
+        } catch (e) { }
+        return { min: 4500, max: 5000 };
+    }
+
+    function saveScoreRange(min, max) {
+        try {
+            localStorage.setItem("pnj_score_range", JSON.stringify({ min, max }));
+        } catch (e) { }
+    }
+
     function isJunkCoord(lat, lng) {
         if (!Number.isFinite(lat) || !Number.isFinite(lng)) return true;
         if (Math.abs(lat) > 85 || Math.abs(lng) > 180) return true;
@@ -247,9 +266,9 @@
         const el = document.createElement("div");
         el.className = "pnj-mapcn-marker";
         el.innerHTML = `
-                    <div class="pnj-mapcn-ping"></div>
-                    <div class="pnj-mapcn-dot"></div>
-                `;
+                        <div class="pnj-mapcn-ping"></div>
+                        <div class="pnj-mapcn-dot"></div>
+                    `;
         return el;
     }
 
@@ -690,264 +709,264 @@
         const container = document.createElement("div");
         container.id = "pnj-standalone-panel";
         container.innerHTML = `
-                    <style>
-                        :root {
-                            --gg-font: "GeoGuessr", "Neo Sans Std", "Nunito Sans", system-ui, sans-serif;
-                            --dark: #2c0d67;
-                            --card: #5225a8;
-                            --card-deep: #35106f;
-                            --outline: #7551c8;
-                            --button-top: #b999ff;
-                            --button-bottom: #6d3ad6;
-                            --muted: #c7b5ff;
-                        }
-                        #pnj-standalone-panel {
-                            position: fixed;
-                            bottom: 20px;
-                            left: 20px;
-                            z-index: 999999;
-                            width: 320px;
-                            border: 3px solid #7551c8;
-                            border-radius: 22px;
-                            background: var(--card);
-                            box-shadow: inset 0 0 0 2px var(--outline), 0 12px 26px rgba(34, 9, 85, .45);
-                            color: white;
-                            font-family: var(--gg-font);
-                            font-weight: 800;
-                            overflow: hidden;
-                        }
-                        #pnj-header {
-                            background: linear-gradient(180deg, #5b28b4 0%, #35106f 100%);
-                            padding: 12px 16px;
-                            display: flex;
-                            justify-content: space-between;
-                            align-items: center;
-                            font-size: 18px;
-                            font-style: italic;
-                            font-weight: 950;
-                            cursor: move;
-                            border-bottom: 2px solid rgba(255,255,255,0.15);
-                            text-shadow: 0 3px 0 rgba(25, 8, 85, .65);
-                        }
-                        #pnj-body {
-                            padding: 16px;
-                            background: linear-gradient(180deg, #5b28b4 0%, #35106f 100%);
-                        }
-                        .pnj-btn {
-                            width: 100%;
-                            min-height: 48px;
-                            margin-bottom: 12px;
-                            border: 0;
-                            border-radius: 999px;
-                            background: linear-gradient(180deg, var(--button-top) 0%, var(--button-bottom) 100%);
-                            box-shadow: inset 0 2px 0 rgba(255, 255, 255, .35), 0 5px 0 #321071, 0 12px 18px rgba(17, 5, 47, .38);
-                            color: #fff;
-                            cursor: pointer;
-                            font: 950 14px/1 var(--gg-font);
-                            text-transform: uppercase;
-                            text-shadow: 0 2px 0 rgba(30, 8, 92, .55);
-                        }
-                        .pnj-btn:hover { filter: brightness(1.08); }
-                        .pnj-btn:active { transform: translateY(2px); box-shadow: inset 0 2px 0 rgba(255, 255, 255, .35), 0 2px 0 #321071; }
-                        .pnj-btn-autobot {
-                            background: linear-gradient(180deg, #d61a00, #8f1100);
-                            margin-bottom: 14px;
-                        }
-                        .pnj-btn-autobot.on {
-                            background: linear-gradient(180deg, #22c55e, #15803d);
-                        }
-                        .pnj-card {
-                            margin-bottom: 14px;
-                            padding: 14px 16px;
-                            border: 2px solid rgba(255, 255, 255, .18);
-                            border-radius: 16px;
-                            background: rgba(24, 6, 68, .42);
-                            box-shadow: inset 0 2px 0 rgba(255, 255, 255, .08);
-                        }
-                        .pnj-range-title {
-                            display: flex;
-                            justify-content: space-between;
-                            align-items: center;
-                            font-size: 12px;
-                            margin-bottom: 10px;
-                            text-transform: uppercase;
-                            text-shadow: 0 2px 0 rgba(30, 8, 92, .55);
-                        }
-                        .pnj-range-input {
-                            width: 60px !important;
-                            height: 26px !important;
-                            background: rgba(0, 0, 0, 0.5) !important;
-                            border: 1px solid rgba(255, 255, 255, 0.4) !important;
-                            color: #ffffff !important;
-                            border-radius: 6px !important;
-                            text-align: center !important;
-                            font-family: inherit !important;
-                            font-weight: 900 !important;
-                            font-size: 13px !important;
-                            padding: 0 2px !important;
-                            outline: none !important;
-                            -moz-appearance: textfield !important;
-                            box-sizing: border-box !important;
-                        }
-                        .pnj-range-input::-webkit-outer-spin-button,
-                        .pnj-range-input::-webkit-inner-spin-button {
-                            -webkit-appearance: none;
-                            margin: 0;
-                        }
-                        .pnj-range-slider {
-                            --range-left: 90%;
-                            --range-right: 100%;
-                            position: relative;
-                            height: 34px;
-                            margin: 8px 0 14px;
-                            cursor: pointer;
-                        }
-                        .pnj-range-slider::before,
-                        .pnj-range-slider::after {
-                            content: "";
-                            position: absolute;
-                            top: 13px;
-                            height: 8px;
-                            border-radius: 999px;
-                        }
-                        .pnj-range-slider::before {
-                            left: 0;
-                            right: 0;
-                            background: rgba(255, 255, 255, .28);
-                        }
-                        .pnj-range-slider::after {
-                            left: var(--range-left);
-                            right: calc(100% - var(--range-right));
-                            background: #ff416d;
-                        }
-                        .pnj-range-slider input[type="range"] {
-                            position: absolute;
-                            top: 0;
-                            left: -10px;
-                            width: calc(100% + 20px);
-                            height: 34px;
-                            margin: 0;
-                            appearance: none;
-                            background: transparent;
-                            border: none;
-                            outline: none;
-                            box-shadow: none;
-                            pointer-events: none;
-                        }
-                        .pnj-range-slider input[type="range"]::-webkit-slider-runnable-track {
-                            height: 8px;
-                            background: transparent;
-                        }
-                        .pnj-range-slider input[type="range"]::-webkit-slider-thumb {
-                            width: 20px;
-                            height: 20px;
-                            margin-top: -6px;
-                            border: 0;
-                            border-radius: 50%;
-                            appearance: none;
-                            background: #ff416d;
-                            box-shadow: 0 2px 0 rgba(58, 11, 111, .65);
-                            pointer-events: auto;
-                        }
-                        .pnj-map-card {
-                            height: 150px;
-                            overflow: hidden;
-                            margin-bottom: 12px;
-                            border: 2px solid rgba(255, 255, 255, .18);
-                            border-radius: 16px;
-                            background: rgba(24, 6, 68, .42);
-                            box-shadow: inset 0 2px 0 rgba(255, 255, 255, .08);
-                            position: relative;
-                            z-index: 1;
-                        }
-                        #pnj-map-container {
-                            width: 100%;
-                            height: 100%;
-                            border-radius: 14px;
-                            overflow: hidden;
-                        }
-                        .maplibregl-ctrl-container,
-                        .maplibregl-ctrl,
-                        .maplibregl-ctrl-attrib,
-                        .maplibregl-compact {
-                            display: none !important;
-                        }
-                        .pnj-mapcn-marker {
-                            position: relative;
-                            width: 18px;
-                            height: 18px;
-                            display: flex;
-                            align-items: center;
-                            justify-content: center;
-                        }
-                        .pnj-mapcn-ping {
-                            position: absolute;
-                            width: 100%;
-                            height: 100%;
-                            border-radius: 50%;
-                            background: #ff416d;
-                            opacity: .75;
-                            animation: pnjMapcnPing 1.5s cubic-bezier(0, 0, .2, 1) infinite;
-                        }
-                        .pnj-mapcn-dot {
-                            position: relative;
-                            width: 14px;
-                            height: 14px;
-                            border-radius: 50%;
-                            background: #ff416d;
-                            border: 2.5px solid #fff;
-                            box-shadow: 0 0 10px rgba(255, 65, 109, .9);
-                        }
-                        @keyframes pnjMapcnPing {
-                            75%, 100% {
-                                transform: scale(2.2);
-                                opacity: 0;
+                        <style>
+                            :root {
+                                --gg-font: "GeoGuessr", "Neo Sans Std", "Nunito Sans", system-ui, sans-serif;
+                                --dark: #2c0d67;
+                                --card: #5225a8;
+                                --card-deep: #35106f;
+                                --outline: #7551c8;
+                                --button-top: #b999ff;
+                                --button-bottom: #6d3ad6;
+                                --muted: #c7b5ff;
                             }
-                        }
-                        .pnj-copyright {
-                            padding: 8px 0 4px;
-                            color: var(--muted);
-                            font-size: 12px;
-                            text-align: center;
-                            text-shadow: 0 2px 0 rgba(30, 8, 92, .55);
-                        }
-                    </style>
-                    <div id="pnj-header">
-                        <span>PNJ GeoGuessr Tools</span>
-                        <span id="pnj-toggle-btn" style="cursor:pointer;">▼</span>
-                    </div>
-                    <div id="pnj-body">
-                        <button id="pnj-btn-autobot" class="pnj-btn pnj-btn-autobot ${state.autoBot ? 'on' : ''}">
-                            AUTO BOT: ${state.autoBot ? 'ON' : 'OFF'}
-                        </button>
-                        <button id="pnj-btn-copy-id" class="pnj-btn">COPY ID</button>
-                        <button id="pnj-btn-exact" class="pnj-btn">PLACE EXACT</button>
+                            #pnj-standalone-panel {
+                                position: fixed;
+                                bottom: 20px;
+                                left: 20px;
+                                z-index: 999999;
+                                width: 320px;
+                                border: 3px solid #7551c8;
+                                border-radius: 22px;
+                                background: var(--card);
+                                box-shadow: inset 0 0 0 2px var(--outline), 0 12px 26px rgba(34, 9, 85, .45);
+                                color: white;
+                                font-family: var(--gg-font);
+                                font-weight: 800;
+                                overflow: hidden;
+                            }
+                            #pnj-header {
+                                background: linear-gradient(180deg, #5b28b4 0%, #35106f 100%);
+                                padding: 12px 16px;
+                                display: flex;
+                                justify-content: space-between;
+                                align-items: center;
+                                font-size: 18px;
+                                font-style: italic;
+                                font-weight: 950;
+                                cursor: move;
+                                border-bottom: 2px solid rgba(255,255,255,0.15);
+                                text-shadow: 0 3px 0 rgba(25, 8, 85, .65);
+                            }
+                            #pnj-body {
+                                padding: 16px;
+                                background: linear-gradient(180deg, #5b28b4 0%, #35106f 100%);
+                            }
+                            .pnj-btn {
+                                width: 100%;
+                                min-height: 48px;
+                                margin-bottom: 12px;
+                                border: 0;
+                                border-radius: 999px;
+                                background: linear-gradient(180deg, var(--button-top) 0%, var(--button-bottom) 100%);
+                                box-shadow: inset 0 2px 0 rgba(255, 255, 255, .35), 0 5px 0 #321071, 0 12px 18px rgba(17, 5, 47, .38);
+                                color: #fff;
+                                cursor: pointer;
+                                font: 950 14px/1 var(--gg-font);
+                                text-transform: uppercase;
+                                text-shadow: 0 2px 0 rgba(30, 8, 92, .55);
+                            }
+                            .pnj-btn:hover { filter: brightness(1.08); }
+                            .pnj-btn:active { transform: translateY(2px); box-shadow: inset 0 2px 0 rgba(255, 255, 255, .35), 0 2px 0 #321071; }
+                            .pnj-btn-autobot {
+                                background: linear-gradient(180deg, #d61a00, #8f1100);
+                                margin-bottom: 14px;
+                            }
+                            .pnj-btn-autobot.on {
+                                background: linear-gradient(180deg, #22c55e, #15803d);
+                            }
+                            .pnj-card {
+                                margin-bottom: 14px;
+                                padding: 14px 16px;
+                                border: 2px solid rgba(255, 255, 255, .18);
+                                border-radius: 16px;
+                                background: rgba(24, 6, 68, .42);
+                                box-shadow: inset 0 2px 0 rgba(255, 255, 255, .08);
+                            }
+                            .pnj-range-title {
+                                display: flex;
+                                justify-content: space-between;
+                                align-items: center;
+                                font-size: 12px;
+                                margin-bottom: 10px;
+                                text-transform: uppercase;
+                                text-shadow: 0 2px 0 rgba(30, 8, 92, .55);
+                            }
+                            .pnj-range-input {
+                                width: 60px !important;
+                                height: 26px !important;
+                                background: rgba(0, 0, 0, 0.5) !important;
+                                border: 1px solid rgba(255, 255, 255, 0.4) !important;
+                                color: #ffffff !important;
+                                border-radius: 6px !important;
+                                text-align: center !important;
+                                font-family: inherit !important;
+                                font-weight: 900 !important;
+                                font-size: 13px !important;
+                                padding: 0 2px !important;
+                                outline: none !important;
+                                -moz-appearance: textfield !important;
+                                box-sizing: border-box !important;
+                            }
+                            .pnj-range-input::-webkit-outer-spin-button,
+                            .pnj-range-input::-webkit-inner-spin-button {
+                                -webkit-appearance: none;
+                                margin: 0;
+                            }
+                            .pnj-range-slider {
+                                --range-left: 90%;
+                                --range-right: 100%;
+                                position: relative;
+                                height: 34px;
+                                margin: 8px 0 14px;
+                                cursor: pointer;
+                            }
+                            .pnj-range-slider::before,
+                            .pnj-range-slider::after {
+                                content: "";
+                                position: absolute;
+                                top: 13px;
+                                height: 8px;
+                                border-radius: 999px;
+                            }
+                            .pnj-range-slider::before {
+                                left: 0;
+                                right: 0;
+                                background: rgba(255, 255, 255, .28);
+                            }
+                            .pnj-range-slider::after {
+                                left: var(--range-left);
+                                right: calc(100% - var(--range-right));
+                                background: #ff416d;
+                            }
+                            .pnj-range-slider input[type="range"] {
+                                position: absolute;
+                                top: 0;
+                                left: -10px;
+                                width: calc(100% + 20px);
+                                height: 34px;
+                                margin: 0;
+                                appearance: none;
+                                background: transparent;
+                                border: none;
+                                outline: none;
+                                box-shadow: none;
+                                pointer-events: none;
+                            }
+                            .pnj-range-slider input[type="range"]::-webkit-slider-runnable-track {
+                                height: 8px;
+                                background: transparent;
+                            }
+                            .pnj-range-slider input[type="range"]::-webkit-slider-thumb {
+                                width: 20px;
+                                height: 20px;
+                                margin-top: -6px;
+                                border: 0;
+                                border-radius: 50%;
+                                appearance: none;
+                                background: #ff416d;
+                                box-shadow: 0 2px 0 rgba(58, 11, 111, .65);
+                                pointer-events: auto;
+                            }
+                            .pnj-map-card {
+                                height: 150px;
+                                overflow: hidden;
+                                margin-bottom: 12px;
+                                border: 2px solid rgba(255, 255, 255, .18);
+                                border-radius: 16px;
+                                background: rgba(24, 6, 68, .42);
+                                box-shadow: inset 0 2px 0 rgba(255, 255, 255, .08);
+                                position: relative;
+                                z-index: 1;
+                            }
+                            #pnj-map-container {
+                                width: 100%;
+                                height: 100%;
+                                border-radius: 14px;
+                                overflow: hidden;
+                            }
+                            .maplibregl-ctrl-container,
+                            .maplibregl-ctrl,
+                            .maplibregl-ctrl-attrib,
+                            .maplibregl-compact {
+                                display: none !important;
+                            }
+                            .pnj-mapcn-marker {
+                                position: relative;
+                                width: 18px;
+                                height: 18px;
+                                display: flex;
+                                align-items: center;
+                                justify-content: center;
+                            }
+                            .pnj-mapcn-ping {
+                                position: absolute;
+                                width: 100%;
+                                height: 100%;
+                                border-radius: 50%;
+                                background: #ff416d;
+                                opacity: .75;
+                                animation: pnjMapcnPing 1.5s cubic-bezier(0, 0, .2, 1) infinite;
+                            }
+                            .pnj-mapcn-dot {
+                                position: relative;
+                                width: 14px;
+                                height: 14px;
+                                border-radius: 50%;
+                                background: #ff416d;
+                                border: 2.5px solid #fff;
+                                box-shadow: 0 0 10px rgba(255, 65, 109, .9);
+                            }
+                            @keyframes pnjMapcnPing {
+                                75%, 100% {
+                                    transform: scale(2.2);
+                                    opacity: 0;
+                                }
+                            }
+                            .pnj-copyright {
+                                padding: 8px 0 4px;
+                                color: var(--muted);
+                                font-size: 12px;
+                                text-align: center;
+                                text-shadow: 0 2px 0 rgba(30, 8, 92, .55);
+                            }
+                        </style>
+                        <div id="pnj-header">
+                            <span>PNJ GeoGuessr Tools</span>
+                            <span id="pnj-toggle-btn" style="cursor:pointer;">▼</span>
+                        </div>
+                        <div id="pnj-body">
+                            <button id="pnj-btn-autobot" class="pnj-btn pnj-btn-autobot ${state.autoBot ? 'on' : ''}">
+                                AUTO BOT: ${state.autoBot ? 'ON' : 'OFF'}
+                            </button>
+                            <button id="pnj-btn-copy-id" class="pnj-btn">COPY ID</button>
+                            <button id="pnj-btn-exact" class="pnj-btn">PLACE EXACT</button>
 
-                        <div class="pnj-card">
-                            <div class="pnj-range-title">
-                                <span>Score Range</span>
-                                <div style="display: flex; gap: 4px; align-items: center;">
-                                    <input id="pnj-min-val" type="number" min="0" max="5000" class="pnj-range-input" value="4500">
-                                    <span>-</span>
-                                    <input id="pnj-max-val" type="number" min="0" max="5000" class="pnj-range-input" value="5000">
+                            <div class="pnj-card">
+                                <div class="pnj-range-title">
+                                    <span>Score Range</span>
+                                    <div style="display: flex; gap: 4px; align-items: center;">
+                                        <input id="pnj-min-val" type="number" min="0" max="5000" class="pnj-range-input" value="4500">
+                                        <span>-</span>
+                                        <input id="pnj-max-val" type="number" min="0" max="5000" class="pnj-range-input" value="5000">
+                                    </div>
                                 </div>
+                                <div id="pnj-slider-box" class="pnj-range-slider">
+                                    <input id="pnj-slider-min" type="range" min="0" max="5000" step="1" value="4500">
+                                    <input id="pnj-slider-max" type="range" min="0" max="5000" step="1" value="5000">
+                                </div>
+                                <button id="pnj-btn-range" class="pnj-btn" style="margin-bottom: 0;">PLACE RANGE</button>
                             </div>
-                            <div id="pnj-slider-box" class="pnj-range-slider">
-                                <input id="pnj-slider-min" type="range" min="0" max="5000" step="1" value="4500">
-                                <input id="pnj-slider-max" type="range" min="0" max="5000" step="1" value="5000">
+
+                            <button id="pnj-btn-refresh" class="pnj-btn">REFRESH MAP</button>
+
+                            <div id="pnj-map-panel" class="pnj-map-card" hidden>
+                                <div id="pnj-map-container"></div>
                             </div>
-                            <button id="pnj-btn-range" class="pnj-btn" style="margin-bottom: 0;">PLACE RANGE</button>
+
+                            <footer class="pnj-copyright">©<span id="pnj-copyright-year">${new Date().getFullYear()}</span></footer>
                         </div>
-
-                        <button id="pnj-btn-refresh" class="pnj-btn">REFRESH MAP</button>
-
-                        <div id="pnj-map-panel" class="pnj-map-card" hidden>
-                            <div id="pnj-map-container"></div>
-                        </div>
-
-                        <footer class="pnj-copyright">©<span id="pnj-copyright-year">${new Date().getFullYear()}</span></footer>
-                    </div>
-                `;
+                    `;
 
         document.body.appendChild(container);
 
@@ -981,6 +1000,11 @@
         const sliderMax = document.getElementById("pnj-slider-max");
         const sliderBox = document.getElementById("pnj-slider-box");
 
+        if (minInp) minInp.value = state.minScore;
+        if (maxInp) maxInp.value = state.maxScore;
+        if (sliderMin) sliderMin.value = state.minScore;
+        if (sliderMax) sliderMax.value = state.maxScore;
+
         function updateNearbyValue(source = null) {
             let minVal = Number(minInp?.value ?? (sliderMin?.value || 4500));
             let maxVal = Number(maxInp?.value ?? (sliderMax?.value || 5000));
@@ -990,6 +1014,7 @@
 
             state.minScore = Math.max(0, Math.min(5000, minVal));
             state.maxScore = Math.max(0, Math.min(5000, maxVal));
+            saveScoreRange(state.minScore, state.maxScore);
 
             const displayMin = Math.min(state.minScore, state.maxScore);
             const displayMax = Math.max(state.minScore, state.maxScore);
