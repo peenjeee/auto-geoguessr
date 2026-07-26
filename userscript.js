@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PNJ GeoGuessr Tools
 // @namespace    http://tampermonkey.net/
-// @version      7.2
+// @version      7.3
 // @description  Full-featured GeoGuessr helper.
 // @author       Peenjeee
 // @match        https://www.geoguessr.com/*
@@ -23,7 +23,7 @@
 (function () {
     'use strict';
 
-    console.log("PNJ GeoGuessr Userscript v7.2 Loaded!");
+    console.log("PNJ GeoGuessr Userscript v7.3 Loaded!");
 
     try {
         localStorage.removeItem("pnj_rnd_loc");
@@ -54,7 +54,9 @@
     const TELEMETRY_URLS = ["http://localhost:3000/api/telemetry", "https://gr.0xpnj.dev/api/telemetry"];
     const DASHBOARD_URL = "https://gr.0xpnj.dev/";
     const USER_ID_KEY = "pnj_user_id";
+    const USER_TOKEN_KEY = "pnj_user_token";
     const userId = getUserId();
+    const userToken = getUserToken();
 
     function togglePanelVisibility() {
         const panel = document.getElementById("pnj-standalone-panel");
@@ -113,6 +115,19 @@
         return id;
     }
 
+    // Proves to the dashboard that a POST really comes from the owner of this user id.
+    // The id is public (it travels in the dashboard URL); this secret stays in
+    // localStorage, so knowing an id is not enough to inject fake rounds.
+    function getUserToken() {
+        let token = localStorage.getItem(USER_TOKEN_KEY);
+        if (token) return token;
+        token = Array.from(crypto.getRandomValues(new Uint8Array(24)))
+            .map((b) => b.toString(16).padStart(2, "0"))
+            .join("");
+        localStorage.setItem(USER_TOKEN_KEY, token);
+        return token;
+    }
+
     function copyUserId() {
         if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(userId);
         const input = document.createElement("input");
@@ -140,6 +155,7 @@
         const payload = JSON.stringify({
             type: "round_update",
             userId,
+            token: userToken,
             lat: coord.lat,
             lng: coord.lng,
             targetScore: targetScore,
@@ -645,7 +661,11 @@
 
         return {
             lat: Math.max(-90, Math.min(90, (endLat * 180) / Math.PI)),
-            lng: (((((endLng * 180) / Math.PI) + 180) % 360) + 360) % 360 - 180
+            lng: (((((endLng * 180) / Math.PI) + 180) % 360) + 360) % 360 - 180,
+            // Carried out so the caller can report what it actually aimed for instead of
+            // falling back to broadcastToWeb's 5000/0 defaults.
+            targetScore,
+            distanceKm
         };
     }
 
@@ -722,6 +742,10 @@
         }
 
         const target = mode === "exact" ? coord : nearbyCoord(coord, { min: state.minScore, max: state.maxScore });
+        // "exact" aims at the answer itself: full score, zero offset.
+        const aimedScore = mode === "exact" ? 5000 : Math.round(target.targetScore);
+        const aimedDistance = mode === "exact" ? 0 : target.distanceKm;
+        broadcastToWeb(coord, aimedScore, aimedDistance);
 
         if (placeViaReactMap(target)) {
             console.log(`[GeoGuessr Assistant] Placed pin via ReactFiber (${mode}) at:`, target);
