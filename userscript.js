@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PNJ GeoGuessr Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.3
+// @version      5.0
 // @description  Full-featured GeoGuessr helper.
 // @author       Peenjeee
 // @match        https://www.geoguessr.com/*
@@ -17,7 +17,7 @@
 (function () {
     'use strict';
 
-    console.log("PNJ GeoGuessr Userscript v4.1 Loaded!");
+    console.log("PNJ GeoGuessr Userscript v5.0 Loaded!");
 
     try {
         localStorage.removeItem("pnj_rnd_loc");
