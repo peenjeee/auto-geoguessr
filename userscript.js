@@ -18,6 +18,8 @@
 // @connect      gr.0xpnj.dev
 // ==/UserScript==
 
+/* global maplibregl */
+
 (function () {
     'use strict';
 
