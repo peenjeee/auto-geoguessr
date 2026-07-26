@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PNJ GeoGuessr Tools
 // @namespace    http://tampermonkey.net/
-// @version      5.0
+// @version      6.0
 // @description  Full-featured GeoGuessr helper.
 // @author       Peenjeee
 // @match        https://www.geoguessr.com/*
@@ -9,6 +9,10 @@
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
 // @grant        GM_registerMenuCommand
+// @grant        GM_addStyle
+// @grant        GM_getResourceText
+// @require      https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js
+// @resource     maplibreCss https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css
 // @connect      localhost
 // @connect      127.0.0.1
 // @connect      gr.0xpnj.dev
@@ -17,7 +21,7 @@
 (function () {
     'use strict';
 
-    console.log("PNJ GeoGuessr Userscript v5.0 Loaded!");
+    console.log("PNJ GeoGuessr Userscript v6.0 Loaded!");
 
     try {
         localStorage.removeItem("pnj_rnd_loc");
@@ -27,8 +31,10 @@
     const state = (window.__pnjState = window.__pnjState || {
         locations: [],
         current: null,
+        currentQuality: 0,
+        currentAt: 0,
         autoBot: false,
-        mapScale: 1492.7,
+        mapScale: null,
         minScore: 4500,
         maxScore: 5000
     });
@@ -148,7 +154,7 @@
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: payload
-                    }).catch(() => {});
+                    }).catch(() => { });
                 } catch (e) { }
             }
         });
@@ -160,12 +166,24 @@
         } catch (e) { }
     }
 
-    function rememberLocation(coord) {
+    function isJunkCoord(lat, lng) {
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return true;
+        if (Math.abs(lat) > 85 || Math.abs(lng) > 180) return true;
+        if (Math.abs(lat) < 0.5 && Math.abs(lng) < 0.5) return true;
+        if (Math.abs(lat - 74.01954) < 0.001 && Math.abs(lng - 22.5) < 0.001) return true;
+        return false;
+    }
+
+    function rememberLocation(coord, quality = 1) {
         if (!coord || typeof coord.lat !== "number" || typeof coord.lng !== "number") return;
-        if (Math.abs(coord.lat) > 90 || Math.abs(coord.lng) > 180 || (coord.lat === 0 && coord.lng === 0)) return;
-        if (Math.abs(coord.lat - 74.01954) < 0.001 && Math.abs(coord.lng - 22.5) < 0.001) return;
+        if (isJunkCoord(coord.lat, coord.lng)) return;
+
+        const now = Date.now();
+        if (quality < (state.currentQuality || 0) && now - (state.currentAt || 0) < 45000) return;
 
         state.current = coord;
+        state.currentQuality = quality;
+        state.currentAt = now;
         if (window.__pnjState) window.__pnjState.current = coord;
         state.locations.push(coord);
         if (state.locations.length > 20) state.locations.shift();
@@ -174,39 +192,62 @@
         broadcastToWeb(coord);
     }
 
+    // mapcn (mapcn.dev) is React-only, but it is a thin layer over MapLibre GL + free CARTO
+    // basemaps with light/dark switching — that is what we reproduce here in plain JS.
+    const MAPCN_STYLES = {
+        light: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+        dark: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+    };
+
     let maplibreMap = null;
     let maplibreMarker = null;
+    let maplibreCssReady = false;
 
-    function loadMapLibre(callback) {
-        if (window.maplibregl) {
-            callback();
-            return;
-        }
+    // @require loads MapLibre into the userscript scope; fall back to the page global for
+    // managers that skip @require or when the script is pasted into a console.
+    function getMapLibre() {
+        if (typeof maplibregl !== "undefined" && maplibregl) return maplibregl;
+        try {
+            if (typeof unsafeWindow !== "undefined" && unsafeWindow.maplibregl) return unsafeWindow.maplibregl;
+        } catch (e) { }
+        return window.maplibregl || null;
+    }
+
+    function ensureMapLibreCss() {
+        if (maplibreCssReady) return;
+        maplibreCssReady = true;
+
+        try {
+            if (typeof GM_getResourceText === "function" && typeof GM_addStyle === "function") {
+                const css = GM_getResourceText("maplibreCss");
+                if (css) {
+                    GM_addStyle(css);
+                    return;
+                }
+            }
+        } catch (e) { }
+
         if (!document.getElementById("pnj-maplibre-css")) {
             const link = document.createElement("link");
             link.id = "pnj-maplibre-css";
             link.rel = "stylesheet";
             link.href = "https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css";
-            document.head.appendChild(link);
-        }
-        if (!document.getElementById("pnj-maplibre-js")) {
-            const script = document.createElement("script");
-            script.id = "pnj-maplibre-js";
-            script.src = "https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js";
-            script.onload = callback;
-            document.head.appendChild(script);
+            (document.head || document.documentElement).appendChild(link);
         }
     }
 
+    function mapcnStyleUrl() {
+        const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+        return prefersDark ? MAPCN_STYLES.dark : MAPCN_STYLES.light;
+    }
+
     function createMapcnMarker() {
-        const el = document.createElement('div');
-        el.className = 'pnj-mapcn-marker-container';
+        const el = document.createElement("div");
+        el.className = "pnj-mapcn-marker";
         el.innerHTML = `
-            <div style="position: relative; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center;">
-                <div style="position: absolute; width: 100%; height: 100%; border-radius: 50%; background: #ff416d; opacity: 0.75; animation: mapcnPing 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>
-                <div style="position: relative; width: 14px; height: 14px; border-radius: 50%; background: #ff416d; border: 2.5px solid #ffffff; box-shadow: 0 0 10px rgba(255, 65, 109, 0.9);"></div>
-            </div>
-        `;
+                    <div class="pnj-mapcn-ping"></div>
+                    <div class="pnj-mapcn-dot"></div>
+                `;
         return el;
     }
 
@@ -219,38 +260,50 @@
         if (mapPanel) mapPanel.hidden = false;
         if (!mapContainer) return;
 
-        if (!window.maplibregl) {
-            loadMapLibre(() => updateMapFrame(coord));
+        const gl = getMapLibre();
+        if (!gl) {
+            console.warn("[PNJ] MapLibre unavailable — reinstall the userscript so @require can load it.");
             return;
         }
+
+        ensureMapLibreCss();
 
         const mapKey = `${coord.lat},${coord.lng}`;
 
         if (!maplibreMap) {
-            maplibreMap = new window.maplibregl.Map({
-                container: 'pnj-map-container',
-                style: 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json',
-                center: [coord.lng, coord.lat],
-                zoom: 7,
-                attributionControl: false
-            });
+            try {
+                maplibreMap = new gl.Map({
+                    container: mapContainer,
+                    style: mapcnStyleUrl(),
+                    center: [coord.lng, coord.lat],
+                    zoom: 7,
+                    attributionControl: false,
+                });
+            } catch (e) {
+                console.warn("[PNJ] MapLibre failed to start:", e);
+                maplibreMap = null;
+                return;
+            }
 
-            const markerEl = createMapcnMarker();
-
-            maplibreMarker = new window.maplibregl.Marker({ element: markerEl, anchor: 'center' })
+            maplibreMarker = new gl.Marker({ element: createMapcnMarker(), anchor: "center" })
                 .setLngLat([coord.lng, coord.lat])
                 .addTo(maplibreMap);
 
+            // The card is 150px tall and was hidden until now, so MapLibre may have measured
+            // a zero-size container; resize once the style is in and again after layout.
+            maplibreMap.on("load", () => maplibreMap.resize());
+            setTimeout(() => maplibreMap && maplibreMap.resize(), 300);
+
             lastMapKey = mapKey;
-            setTimeout(() => maplibreMap.resize(), 300);
-        } else if (mapKey !== lastMapKey) {
+            return;
+        }
+
+        if (mapKey !== lastMapKey) {
+            lastMapKey = mapKey;
             maplibreMap.setCenter([coord.lng, coord.lat]);
             maplibreMap.setZoom(7);
-            if (maplibreMarker) {
-                maplibreMarker.setLngLat([coord.lng, coord.lat]);
-            }
-            lastMapKey = mapKey;
-            setTimeout(() => maplibreMap.resize(), 100);
+            if (maplibreMarker) maplibreMarker.setLngLat([coord.lng, coord.lat]);
+            maplibreMap.resize();
         }
     }
 
@@ -306,24 +359,69 @@
         return null;
     }
 
-    function patchStreetView() {
-        if (window.google && window.google.maps) {
-            if (window.google.maps.StreetViewPanorama && !window.google.maps.StreetViewPanorama.__pnjPatched) {
-                const OrigSV = window.google.maps.StreetViewPanorama;
-                function PatchedSV(...args) {
-                    const instance = new OrigSV(...args);
-                    instance.addListener("position_changed", () => {
-                        const pos = instance.getPosition();
-                        if (pos && typeof pos.lat === "function") {
-                            rememberLocation({ lat: pos.lat(), lng: pos.lng() });
-                        }
-                    });
-                    return instance;
+    function wrapStreetViewClass(OrigSV) {
+        function PatchedSV(...args) {
+            const instance = new OrigSV(...args);
+            instance.addListener("position_changed", () => {
+                const pos = instance.getPosition();
+                if (pos && typeof pos.lat === "function") {
+                    rememberLocation({ lat: pos.lat(), lng: pos.lng() }, 3);
                 }
-                PatchedSV.prototype = OrigSV.prototype;
-                window.google.maps.StreetViewPanorama = PatchedSV;
-                window.google.maps.StreetViewPanorama.__pnjPatched = true;
-            }
+            });
+            return instance;
+        }
+        Object.setPrototypeOf(PatchedSV, OrigSV);
+        PatchedSV.prototype = OrigSV.prototype;
+        PatchedSV.__pnjPatched = true;
+        return PatchedSV;
+    }
+
+    function patchSvClass(namespace) {
+        const applySv = (value) =>
+            (typeof value === "function" && !value.__pnjPatched) ? wrapStreetViewClass(value) : value;
+
+        try {
+            let current = applySv(namespace.StreetViewPanorama);
+            Object.defineProperty(namespace, "StreetViewPanorama", {
+                configurable: true,
+                enumerable: true,
+                get() { return current; },
+                set(value) { current = applySv(value); },
+            });
+        } catch (e) {
+            try {
+                if (typeof namespace.StreetViewPanorama === "function" && !namespace.StreetViewPanorama.__pnjPatched) {
+                    namespace.StreetViewPanorama = wrapStreetViewClass(namespace.StreetViewPanorama);
+                }
+            } catch (err) { }
+        }
+    }
+
+    function hookNamespace(target, prop, onValue) {
+        let current = target[prop];
+        try {
+            Object.defineProperty(target, prop, {
+                configurable: true,
+                enumerable: true,
+                get() { return current; },
+                set(value) { current = value; if (value) onValue(value); },
+            });
+        } catch (e) { }
+        if (current) onValue(current);
+    }
+
+    hookNamespace(window, "google", (google) => {
+        if (google && typeof google === "object") {
+            hookNamespace(google, "maps", (maps) => {
+                if (maps && typeof maps === "object") patchSvClass(maps);
+            });
+        }
+    });
+
+    function patchStreetView() {
+        if (window.google && window.google.maps &&
+            window.google.maps.StreetViewPanorama && !window.google.maps.StreetViewPanorama.__pnjPatched) {
+            patchSvClass(window.google.maps);
         }
     }
     setInterval(patchStreetView, 1000);
@@ -358,12 +456,23 @@
     function extractFromGoogleMaps(text) {
         if (!text || typeof text !== 'string') return false;
         try {
-            const pattern = /-?\d+\.\d+,-?\d+\.\d+/g;
             let match;
+
+            const anchored = /null,null,(-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)/g;
+            while ((match = anchored.exec(text)) !== null) {
+                const lat = Number(match[1]);
+                const lng = Number(match[2]);
+                if (!isJunkCoord(lat, lng)) {
+                    rememberLocation({ lat, lng }, 2);
+                    return true;
+                }
+            }
+
+            const pattern = /-?\d{1,2}\.\d{3,},-?\d{1,3}\.\d{3,}/g;
             while ((match = pattern.exec(text)) !== null) {
                 const [lat, lng] = match[0].split(",").map(Number);
-                if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && (lat !== 0 || lng !== 0)) {
-                    rememberLocation({ lat, lng });
+                if (!isJunkCoord(lat, lng)) {
+                    rememberLocation({ lat, lng }, 1);
                     return true;
                 }
             }
@@ -391,8 +500,8 @@
     function findCoordsInJson(obj, depth = 0) {
         if (depth > 25 || !obj || typeof obj !== 'object') return false;
         if (typeof obj.lat === 'number' && typeof obj.lng === 'number') {
-            if (Math.abs(obj.lat) <= 90 && Math.abs(obj.lng) <= 180 && (obj.lat !== 0 || obj.lng !== 0)) {
-                rememberLocation({ lat: obj.lat, lng: obj.lng });
+            if (!isJunkCoord(obj.lat, obj.lng)) {
+                rememberLocation({ lat: obj.lat, lng: obj.lng }, 1);
                 return true;
             }
         }
@@ -413,8 +522,12 @@
         const method = String(args[0] || "").toUpperCase();
         const url = String(args[1] || "");
 
-        if (method === 'POST' &&
-            url.startsWith('https://maps.googleapis.com/$rpc/google.internal.maps.mapsjs.v1.MapsJsInternalService/')) {
+        const isMapsRpc = method === 'POST' &&
+            url.startsWith('https://maps.googleapis.com/$rpc/google.internal.maps.mapsjs.v1.MapsJsInternalService/');
+        const isPanoLookup = url.includes("maps.googleapis.com") &&
+            (url.includes("GetMetadata") || url.includes("SingleImageSearch"));
+
+        if (isMapsRpc || isPanoLookup) {
             this.addEventListener('load', function () {
                 try { extractFromGoogleMaps(this.responseText); } catch (e) { }
             });
@@ -456,8 +569,8 @@
         const high = Math.max(minScore, maxScore);
         const targetScore = low + Math.random() * (high - low);
         const earthRadiusKm = 6371;
-        const scoreScaleKm = state.mapScale || 1492.7;
-        const distanceKm = targetScore >= 4999 ? 0 : -scoreScaleKm * Math.log(targetScore / 5000);
+        const scoreScaleKm = state.mapScale || 1492;
+        const distanceKm = targetScore > 0 ? -scoreScaleKm * Math.log(targetScore / 5000) : scoreScaleKm * 10;
         const bearing = Math.random() * Math.PI * 2;
         const startLat = (coord.lat * Math.PI) / 180;
         const startLng = (coord.lng * Math.PI) / 180;
@@ -575,237 +688,264 @@
         const container = document.createElement("div");
         container.id = "pnj-standalone-panel";
         container.innerHTML = `
-            <style>
-                :root {
-                    --gg-font: "GeoGuessr", "Neo Sans Std", "Nunito Sans", system-ui, sans-serif;
-                    --dark: #2c0d67;
-                    --card: #5225a8;
-                    --card-deep: #35106f;
-                    --outline: #7551c8;
-                    --button-top: #b999ff;
-                    --button-bottom: #6d3ad6;
-                    --muted: #c7b5ff;
-                }
-                #pnj-standalone-panel {
-                    position: fixed;
-                    bottom: 20px;
-                    left: 20px;
-                    z-index: 999999;
-                    width: 320px;
-                    border: 3px solid #7551c8;
-                    border-radius: 22px;
-                    background: var(--card);
-                    box-shadow: inset 0 0 0 2px var(--outline), 0 12px 26px rgba(34, 9, 85, .45);
-                    color: white;
-                    font-family: var(--gg-font);
-                    font-weight: 800;
-                    overflow: hidden;
-                }
-                #pnj-header {
-                    background: linear-gradient(180deg, #5b28b4 0%, #35106f 100%);
-                    padding: 12px 16px;
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                    font-size: 18px;
-                    font-style: italic;
-                    font-weight: 950;
-                    cursor: move;
-                    border-bottom: 2px solid rgba(255,255,255,0.15);
-                    text-shadow: 0 3px 0 rgba(25, 8, 85, .65);
-                }
-                #pnj-body {
-                    padding: 16px;
-                    background: linear-gradient(180deg, #5b28b4 0%, #35106f 100%);
-                }
-                .pnj-btn {
-                    width: 100%;
-                    min-height: 48px;
-                    margin-bottom: 12px;
-                    border: 0;
-                    border-radius: 999px;
-                    background: linear-gradient(180deg, var(--button-top) 0%, var(--button-bottom) 100%);
-                    box-shadow: inset 0 2px 0 rgba(255, 255, 255, .35), 0 5px 0 #321071, 0 12px 18px rgba(17, 5, 47, .38);
-                    color: #fff;
-                    cursor: pointer;
-                    font: 950 14px/1 var(--gg-font);
-                    text-transform: uppercase;
-                    text-shadow: 0 2px 0 rgba(30, 8, 92, .55);
-                }
-                .pnj-btn:hover { filter: brightness(1.08); }
-                .pnj-btn:active { transform: translateY(2px); box-shadow: inset 0 2px 0 rgba(255, 255, 255, .35), 0 2px 0 #321071; }
-                .pnj-btn-autobot {
-                    background: linear-gradient(180deg, #d61a00, #8f1100);
-                    margin-bottom: 14px;
-                }
-                .pnj-btn-autobot.on {
-                    background: linear-gradient(180deg, #22c55e, #15803d);
-                }
-                .pnj-card {
-                    margin-bottom: 14px;
-                    padding: 14px 16px;
-                    border: 2px solid rgba(255, 255, 255, .18);
-                    border-radius: 16px;
-                    background: rgba(24, 6, 68, .42);
-                    box-shadow: inset 0 2px 0 rgba(255, 255, 255, .08);
-                }
-                .pnj-range-title {
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                    font-size: 12px;
-                    margin-bottom: 10px;
-                    text-transform: uppercase;
-                    text-shadow: 0 2px 0 rgba(30, 8, 92, .55);
-                }
-                .pnj-range-input {
-                    width: 60px !important;
-                    height: 26px !important;
-                    background: rgba(0, 0, 0, 0.5) !important;
-                    border: 1px solid rgba(255, 255, 255, 0.4) !important;
-                    color: #ffffff !important;
-                    border-radius: 6px !important;
-                    text-align: center !important;
-                    font-family: inherit !important;
-                    font-weight: 900 !important;
-                    font-size: 13px !important;
-                    padding: 0 2px !important;
-                    outline: none !important;
-                    -moz-appearance: textfield !important;
-                    box-sizing: border-box !important;
-                }
-                .pnj-range-input::-webkit-outer-spin-button,
-                .pnj-range-input::-webkit-inner-spin-button {
-                    -webkit-appearance: none;
-                    margin: 0;
-                }
-                .pnj-range-slider {
-                    --range-left: 90%;
-                    --range-right: 100%;
-                    position: relative;
-                    height: 34px;
-                    margin: 8px 0 14px;
-                    cursor: pointer;
-                }
-                .pnj-range-slider::before,
-                .pnj-range-slider::after {
-                    content: "";
-                    position: absolute;
-                    top: 13px;
-                    height: 8px;
-                    border-radius: 999px;
-                }
-                .pnj-range-slider::before {
-                    left: 0;
-                    right: 0;
-                    background: rgba(255, 255, 255, .28);
-                }
-                .pnj-range-slider::after {
-                    left: var(--range-left);
-                    right: calc(100% - var(--range-right));
-                    background: #ff416d;
-                }
-                .pnj-range-slider input[type="range"] {
-                    position: absolute;
-                    top: 0;
-                    left: -10px;
-                    width: calc(100% + 20px);
-                    height: 34px;
-                    margin: 0;
-                    appearance: none;
-                    background: transparent;
-                    border: none;
-                    outline: none;
-                    box-shadow: none;
-                    pointer-events: none;
-                }
-                .pnj-range-slider input[type="range"]::-webkit-slider-runnable-track {
-                    height: 8px;
-                    background: transparent;
-                }
-                .pnj-range-slider input[type="range"]::-webkit-slider-thumb {
-                    width: 20px;
-                    height: 20px;
-                    margin-top: -6px;
-                    border: 0;
-                    border-radius: 50%;
-                    appearance: none;
-                    background: #ff416d;
-                    box-shadow: 0 2px 0 rgba(58, 11, 111, .65);
-                    pointer-events: auto;
-                }
-                @keyframes mapcnPing {
-                    75%, 100% {
-                        transform: scale(2.2);
-                        opacity: 0;
-                    }
-                }
-                .maplibregl-ctrl-container,
-                .maplibregl-ctrl,
-                .maplibregl-ctrl-attrib,
-                .maplibregl-compact {
-                    display: none !important;
-                }
-                .pnj-map-card {
-                    height: 150px;
-                    overflow: hidden;
-                    margin-bottom: 12px;
-                    border: 2px solid rgba(255, 255, 255, .18);
-                    border-radius: 16px;
-                    background: rgba(24, 6, 68, .42);
-                    box-shadow: inset 0 2px 0 rgba(255, 255, 255, .08);
-                    position: relative;
-                    z-index: 1;
-                }
-                #pnj-map-container {
-                    width: 100%;
-                    height: 100%;
-                    border-radius: 14px;
-                }
-                .pnj-copyright {
-                    padding: 8px 0 4px;
-                    color: var(--muted);
-                    font-size: 12px;
-                    text-align: center;
-                    text-shadow: 0 2px 0 rgba(30, 8, 92, .55);
-                }
-            </style>
-            <div id="pnj-header">
-                <span>PNJ GeoGuessr Tools</span>
-                <span id="pnj-toggle-btn" style="cursor:pointer;">▼</span>
-            </div>
-            <div id="pnj-body">
-                <button id="pnj-btn-autobot" class="pnj-btn pnj-btn-autobot ${state.autoBot ? 'on' : ''}">
-                    AUTO BOT: ${state.autoBot ? 'ON' : 'OFF'}
-                </button>
-                <button id="pnj-btn-copy-id" class="pnj-btn">COPY ID</button>
-                <button id="pnj-btn-exact" class="pnj-btn">PLACE EXACT</button>
+                    <style>
+                        :root {
+                            --gg-font: "GeoGuessr", "Neo Sans Std", "Nunito Sans", system-ui, sans-serif;
+                            --dark: #2c0d67;
+                            --card: #5225a8;
+                            --card-deep: #35106f;
+                            --outline: #7551c8;
+                            --button-top: #b999ff;
+                            --button-bottom: #6d3ad6;
+                            --muted: #c7b5ff;
+                        }
+                        #pnj-standalone-panel {
+                            position: fixed;
+                            bottom: 20px;
+                            left: 20px;
+                            z-index: 999999;
+                            width: 320px;
+                            border: 3px solid #7551c8;
+                            border-radius: 22px;
+                            background: var(--card);
+                            box-shadow: inset 0 0 0 2px var(--outline), 0 12px 26px rgba(34, 9, 85, .45);
+                            color: white;
+                            font-family: var(--gg-font);
+                            font-weight: 800;
+                            overflow: hidden;
+                        }
+                        #pnj-header {
+                            background: linear-gradient(180deg, #5b28b4 0%, #35106f 100%);
+                            padding: 12px 16px;
+                            display: flex;
+                            justify-content: space-between;
+                            align-items: center;
+                            font-size: 18px;
+                            font-style: italic;
+                            font-weight: 950;
+                            cursor: move;
+                            border-bottom: 2px solid rgba(255,255,255,0.15);
+                            text-shadow: 0 3px 0 rgba(25, 8, 85, .65);
+                        }
+                        #pnj-body {
+                            padding: 16px;
+                            background: linear-gradient(180deg, #5b28b4 0%, #35106f 100%);
+                        }
+                        .pnj-btn {
+                            width: 100%;
+                            min-height: 48px;
+                            margin-bottom: 12px;
+                            border: 0;
+                            border-radius: 999px;
+                            background: linear-gradient(180deg, var(--button-top) 0%, var(--button-bottom) 100%);
+                            box-shadow: inset 0 2px 0 rgba(255, 255, 255, .35), 0 5px 0 #321071, 0 12px 18px rgba(17, 5, 47, .38);
+                            color: #fff;
+                            cursor: pointer;
+                            font: 950 14px/1 var(--gg-font);
+                            text-transform: uppercase;
+                            text-shadow: 0 2px 0 rgba(30, 8, 92, .55);
+                        }
+                        .pnj-btn:hover { filter: brightness(1.08); }
+                        .pnj-btn:active { transform: translateY(2px); box-shadow: inset 0 2px 0 rgba(255, 255, 255, .35), 0 2px 0 #321071; }
+                        .pnj-btn-autobot {
+                            background: linear-gradient(180deg, #d61a00, #8f1100);
+                            margin-bottom: 14px;
+                        }
+                        .pnj-btn-autobot.on {
+                            background: linear-gradient(180deg, #22c55e, #15803d);
+                        }
+                        .pnj-card {
+                            margin-bottom: 14px;
+                            padding: 14px 16px;
+                            border: 2px solid rgba(255, 255, 255, .18);
+                            border-radius: 16px;
+                            background: rgba(24, 6, 68, .42);
+                            box-shadow: inset 0 2px 0 rgba(255, 255, 255, .08);
+                        }
+                        .pnj-range-title {
+                            display: flex;
+                            justify-content: space-between;
+                            align-items: center;
+                            font-size: 12px;
+                            margin-bottom: 10px;
+                            text-transform: uppercase;
+                            text-shadow: 0 2px 0 rgba(30, 8, 92, .55);
+                        }
+                        .pnj-range-input {
+                            width: 60px !important;
+                            height: 26px !important;
+                            background: rgba(0, 0, 0, 0.5) !important;
+                            border: 1px solid rgba(255, 255, 255, 0.4) !important;
+                            color: #ffffff !important;
+                            border-radius: 6px !important;
+                            text-align: center !important;
+                            font-family: inherit !important;
+                            font-weight: 900 !important;
+                            font-size: 13px !important;
+                            padding: 0 2px !important;
+                            outline: none !important;
+                            -moz-appearance: textfield !important;
+                            box-sizing: border-box !important;
+                        }
+                        .pnj-range-input::-webkit-outer-spin-button,
+                        .pnj-range-input::-webkit-inner-spin-button {
+                            -webkit-appearance: none;
+                            margin: 0;
+                        }
+                        .pnj-range-slider {
+                            --range-left: 90%;
+                            --range-right: 100%;
+                            position: relative;
+                            height: 34px;
+                            margin: 8px 0 14px;
+                            cursor: pointer;
+                        }
+                        .pnj-range-slider::before,
+                        .pnj-range-slider::after {
+                            content: "";
+                            position: absolute;
+                            top: 13px;
+                            height: 8px;
+                            border-radius: 999px;
+                        }
+                        .pnj-range-slider::before {
+                            left: 0;
+                            right: 0;
+                            background: rgba(255, 255, 255, .28);
+                        }
+                        .pnj-range-slider::after {
+                            left: var(--range-left);
+                            right: calc(100% - var(--range-right));
+                            background: #ff416d;
+                        }
+                        .pnj-range-slider input[type="range"] {
+                            position: absolute;
+                            top: 0;
+                            left: -10px;
+                            width: calc(100% + 20px);
+                            height: 34px;
+                            margin: 0;
+                            appearance: none;
+                            background: transparent;
+                            border: none;
+                            outline: none;
+                            box-shadow: none;
+                            pointer-events: none;
+                        }
+                        .pnj-range-slider input[type="range"]::-webkit-slider-runnable-track {
+                            height: 8px;
+                            background: transparent;
+                        }
+                        .pnj-range-slider input[type="range"]::-webkit-slider-thumb {
+                            width: 20px;
+                            height: 20px;
+                            margin-top: -6px;
+                            border: 0;
+                            border-radius: 50%;
+                            appearance: none;
+                            background: #ff416d;
+                            box-shadow: 0 2px 0 rgba(58, 11, 111, .65);
+                            pointer-events: auto;
+                        }
+                        .pnj-map-card {
+                            height: 150px;
+                            overflow: hidden;
+                            margin-bottom: 12px;
+                            border: 2px solid rgba(255, 255, 255, .18);
+                            border-radius: 16px;
+                            background: rgba(24, 6, 68, .42);
+                            box-shadow: inset 0 2px 0 rgba(255, 255, 255, .08);
+                            position: relative;
+                            z-index: 1;
+                        }
+                        #pnj-map-container {
+                            width: 100%;
+                            height: 100%;
+                            border-radius: 14px;
+                            overflow: hidden;
+                        }
+                        .maplibregl-ctrl-container,
+                        .maplibregl-ctrl,
+                        .maplibregl-ctrl-attrib,
+                        .maplibregl-compact {
+                            display: none !important;
+                        }
+                        .pnj-mapcn-marker {
+                            position: relative;
+                            width: 18px;
+                            height: 18px;
+                            display: flex;
+                            align-items: center;
+                            justify-content: center;
+                        }
+                        .pnj-mapcn-ping {
+                            position: absolute;
+                            width: 100%;
+                            height: 100%;
+                            border-radius: 50%;
+                            background: #ff416d;
+                            opacity: .75;
+                            animation: pnjMapcnPing 1.5s cubic-bezier(0, 0, .2, 1) infinite;
+                        }
+                        .pnj-mapcn-dot {
+                            position: relative;
+                            width: 14px;
+                            height: 14px;
+                            border-radius: 50%;
+                            background: #ff416d;
+                            border: 2.5px solid #fff;
+                            box-shadow: 0 0 10px rgba(255, 65, 109, .9);
+                        }
+                        @keyframes pnjMapcnPing {
+                            75%, 100% {
+                                transform: scale(2.2);
+                                opacity: 0;
+                            }
+                        }
+                        .pnj-copyright {
+                            padding: 8px 0 4px;
+                            color: var(--muted);
+                            font-size: 12px;
+                            text-align: center;
+                            text-shadow: 0 2px 0 rgba(30, 8, 92, .55);
+                        }
+                    </style>
+                    <div id="pnj-header">
+                        <span>PNJ GeoGuessr Tools</span>
+                        <span id="pnj-toggle-btn" style="cursor:pointer;">▼</span>
+                    </div>
+                    <div id="pnj-body">
+                        <button id="pnj-btn-autobot" class="pnj-btn pnj-btn-autobot ${state.autoBot ? 'on' : ''}">
+                            AUTO BOT: ${state.autoBot ? 'ON' : 'OFF'}
+                        </button>
+                        <button id="pnj-btn-copy-id" class="pnj-btn">COPY ID</button>
+                        <button id="pnj-btn-exact" class="pnj-btn">PLACE EXACT</button>
 
-                <div class="pnj-card">
-                    <div class="pnj-range-title">
-                        <span>Score Range</span>
-                        <div style="display: flex; gap: 4px; align-items: center;">
-                            <input id="pnj-min-val" type="number" min="0" max="5000" class="pnj-range-input" value="4500">
-                            <span>-</span>
-                            <input id="pnj-max-val" type="number" min="0" max="5000" class="pnj-range-input" value="5000">
+                        <div class="pnj-card">
+                            <div class="pnj-range-title">
+                                <span>Score Range</span>
+                                <div style="display: flex; gap: 4px; align-items: center;">
+                                    <input id="pnj-min-val" type="number" min="0" max="5000" class="pnj-range-input" value="4500">
+                                    <span>-</span>
+                                    <input id="pnj-max-val" type="number" min="0" max="5000" class="pnj-range-input" value="5000">
+                                </div>
+                            </div>
+                            <div id="pnj-slider-box" class="pnj-range-slider">
+                                <input id="pnj-slider-min" type="range" min="0" max="5000" step="1" value="4500">
+                                <input id="pnj-slider-max" type="range" min="0" max="5000" step="1" value="5000">
+                            </div>
+                            <button id="pnj-btn-range" class="pnj-btn" style="margin-bottom: 0;">PLACE RANGE</button>
                         </div>
+
+                        <button id="pnj-btn-refresh" class="pnj-btn">REFRESH MAP</button>
+
+                        <div id="pnj-map-panel" class="pnj-map-card" hidden>
+                            <div id="pnj-map-container"></div>
+                        </div>
+
+                        <footer class="pnj-copyright">©<span id="pnj-copyright-year">${new Date().getFullYear()}</span></footer>
                     </div>
-                    <div id="pnj-slider-box" class="pnj-range-slider">
-                        <input id="pnj-slider-min" type="range" min="0" max="5000" step="50" value="4500">
-                        <input id="pnj-slider-max" type="range" min="0" max="5000" step="50" value="5000">
-                    </div>
-                    <button id="pnj-btn-range" class="pnj-btn" style="margin-bottom: 0;">PLACE RANGE</button>
-                </div>
-
-                <button id="pnj-btn-refresh" class="pnj-btn">REFRESH MAP</button>
-
-                <div id="pnj-map-panel" class="pnj-map-card" hidden>
-                    <div id="pnj-map-container"></div>
-                </div>
-
-                <footer class="pnj-copyright">©<span id="pnj-copyright-year">${new Date().getFullYear()}</span></footer>
-            </div>
-        `;
+                `;
 
         document.body.appendChild(container);
 
@@ -932,16 +1072,42 @@
             });
 
             minInp.addEventListener("input", () => {
-                let val = Math.max(0, Math.min(5000, Number(minInp.value)));
-                if (sliderMin) sliderMin.value = val;
+                if (minInp.value === "") return;
+                if (Number(minInp.value) > 5000) minInp.value = 5000;
+                if (Number(minInp.value) < 0) minInp.value = 0;
+                if (sliderMin) sliderMin.value = Number(minInp.value);
                 updateNearbyValue("input");
             });
 
             maxInp.addEventListener("input", () => {
-                let val = Math.max(0, Math.min(5000, Number(maxInp.value)));
-                if (sliderMax) sliderMax.value = val;
+                if (maxInp.value === "") return;
+                if (Number(maxInp.value) > 5000) maxInp.value = 5000;
+                if (Number(maxInp.value) < 0) maxInp.value = 0;
+                if (sliderMax) sliderMax.value = Number(maxInp.value);
                 updateNearbyValue("input");
             });
+
+            const commitRange = (edited) => {
+                const readBox = (box, slider) => {
+                    const raw = String(box.value || "").trim();
+                    const num = raw === "" ? Number(slider.value) : Number(raw);
+                    return Math.max(0, Math.min(5000, Number.isFinite(num) ? num : Number(slider.value)));
+                };
+
+                let minVal = readBox(minInp, sliderMin);
+                let maxVal = readBox(maxInp, sliderMax);
+                if (edited === minInp && minVal > maxVal) maxVal = minVal;
+                else if (edited === maxInp && maxVal < minVal) minVal = maxVal;
+
+                minInp.value = minVal;
+                maxInp.value = maxVal;
+                if (sliderMin) sliderMin.value = minVal;
+                if (sliderMax) sliderMax.value = maxVal;
+                updateNearbyValue("slider");
+            };
+
+            minInp.addEventListener("change", () => commitRange(minInp));
+            maxInp.addEventListener("change", () => commitRange(maxInp));
         }
 
         updateNearbyValue();
