@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PNJ GeoGuessr Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.0
+// @version      4.3
 // @description  Full-featured GeoGuessr helper.
 // @author       Peenjeee
 // @match        https://www.geoguessr.com/*
@@ -17,9 +17,8 @@
 (function () {
     'use strict';
 
-    console.log("PNJ GeoGuessr Userscript v4.0 Loaded!");
+    console.log("PNJ GeoGuessr Userscript v4.1 Loaded!");
 
-    // Clear stale cache
     try {
         localStorage.removeItem("pnj_rnd_loc");
         localStorage.removeItem("pnj_auto_bot");
@@ -34,7 +33,6 @@
         maxScore: 5000
     });
 
-    // Ensure state defaults are valid numbers
     if (!state.minScore || state.minScore < 0) state.minScore = 4500;
     if (!state.maxScore || state.maxScore <= 0) state.maxScore = 5000;
 
@@ -55,13 +53,35 @@
 
     if (typeof GM_registerMenuCommand === "function") {
         GM_registerMenuCommand("Hide / Show PNJ Panel (Insert)", togglePanelVisibility);
+        GM_registerMenuCommand("Copy ID (Ctrl+Shift+C)", () => {
+            const coord = getCurrentCoord();
+            if (coord) broadcastToWeb(coord);
+            copyUserId();
+        });
     }
 
     window.addEventListener("keydown", (event) => {
-        if (event.key !== "Insert" || event.repeat) return;
+        if (event.repeat) return;
         const target = event.target;
         if (target && /input|textarea|select/i.test(target.tagName)) return;
-        togglePanelVisibility();
+
+        if (event.key === "Insert") {
+            togglePanelVisibility();
+            return;
+        }
+
+        if (event.key === "C" && event.ctrlKey && event.shiftKey) {
+            event.preventDefault();
+            const coord = getCurrentCoord();
+            if (coord) broadcastToWeb(coord);
+            copyUserId().then(() => {
+                const toast = document.createElement("div");
+                toast.textContent = "✓ ID Copied!";
+                toast.style.cssText = "position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#22c55e;color:#fff;padding:10px 20px;border-radius:8px;font:bold 14px sans-serif;z-index:9999999;box-shadow:0 4px 12px rgba(0,0,0,0.3);";
+                document.body.appendChild(toast);
+                setTimeout(() => toast.remove(), 1500);
+            });
+        }
     });
 
     function generateUserId() {
@@ -102,9 +122,6 @@
         return cleanFetch(url, options);
     }
 
-    // ----------------------------------------------------
-    // Coordinates Extraction & Hooking
-    // ----------------------------------------------------
     function broadcastToWeb(coord, targetScore = 5000, distanceKm = 0) {
         const payload = JSON.stringify({
             type: "round_update",
@@ -289,7 +306,6 @@
         return null;
     }
 
-    // Intercept Google Maps StreetView SDK
     function patchStreetView() {
         if (window.google && window.google.maps) {
             if (window.google.maps.StreetViewPanorama && !window.google.maps.StreetViewPanorama.__pnjPatched) {
@@ -312,7 +328,6 @@
     }
     setInterval(patchStreetView, 1000);
 
-    // Network Hooking
     function distanceKm(lat1, lng1, lat2, lng2) {
         const r = 6371;
         const p = Math.PI / 180;
@@ -324,12 +339,8 @@
 
     function extractBounds(obj, depth = 0) {
         if (depth > 10 || !obj || typeof obj !== "object") return null;
-        if (obj.min && obj.max && Number.isFinite(obj.min.lat) && Number.isFinite(obj.max.lat)) {
-            return obj;
-        }
-        if (obj.bounds && obj.bounds.min && obj.bounds.max && Number.isFinite(obj.bounds.min.lat)) {
-            return obj.bounds;
-        }
+        if (obj.min && obj.max && Number.isFinite(obj.min.lat) && Number.isFinite(obj.max.lat)) return obj;
+        if (obj.bounds && obj.bounds.min && obj.bounds.max && Number.isFinite(obj.bounds.min.lat)) return obj.bounds;
         if (Array.isArray(obj)) {
             for (let i = 0; i < obj.length; i++) {
                 const found = extractBounds(obj[i], depth + 1);
@@ -344,27 +355,25 @@
         return null;
     }
 
-    function inspectGoogleMapsText(text) {
-        if (!text || typeof text !== 'string') return;
+    function extractFromGoogleMaps(text) {
+        if (!text || typeof text !== 'string') return false;
         try {
-            const matches = text.matchAll(/-?\d+\.\d+,\s*-?\d+\.\d+/g);
-            for (const match of matches) {
+            const pattern = /-?\d+\.\d+,-?\d+\.\d+/g;
+            let match;
+            while ((match = pattern.exec(text)) !== null) {
                 const [lat, lng] = match[0].split(",").map(Number);
                 if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && (lat !== 0 || lng !== 0)) {
                     rememberLocation({ lat, lng });
-                    return;
+                    return true;
                 }
             }
         } catch (e) { }
+        return false;
     }
 
-    function inspectText(text, url = "") {
-        if (!text || typeof text !== 'string') return;
-        const urlLower = url.toLowerCase();
-
-        // Ignore map tiles, viewports, bounds, or guesses to prevent map zoom/pan from changing location pin
-        if (/bounds|viewport|mapbounds|tile|vt\/|staticmap|guess/.test(urlLower)) return;
-
+    function extractFromJsonResponse(text, url = "") {
+        if (!text || typeof text !== 'string') return false;
+        if (/bounds|viewport|mapbounds|tile|vt\/|staticmap|guess/.test(url.toLowerCase())) return false;
         try {
             if (text.startsWith('{') || text.startsWith('[')) {
                 const json = JSON.parse(text);
@@ -373,70 +382,73 @@
                     const diagonal = distanceKm(bounds.min.lat, bounds.min.lng, bounds.max.lat, bounds.max.lng);
                     state.mapScale = diagonal > 15000 ? 1492.7 : Math.max(5, diagonal / 10);
                 }
-                findCoordsInObj(json);
+                return findCoordsInJson(json);
             }
         } catch (e) { }
+        return false;
     }
 
-    function findCoordsInObj(obj, depth = 0) {
-        if (depth > 25 || !obj || typeof obj !== 'object') return;
+    function findCoordsInJson(obj, depth = 0) {
+        if (depth > 25 || !obj || typeof obj !== 'object') return false;
         if (typeof obj.lat === 'number' && typeof obj.lng === 'number') {
             if (Math.abs(obj.lat) <= 90 && Math.abs(obj.lng) <= 180 && (obj.lat !== 0 || obj.lng !== 0)) {
                 rememberLocation({ lat: obj.lat, lng: obj.lng });
-                return;
+                return true;
             }
         }
         if (Array.isArray(obj)) {
-            for (let item of obj) findCoordsInObj(item, depth + 1);
+            for (let item of obj) { if (findCoordsInJson(item, depth + 1)) return true; }
         } else {
             for (let key in obj) {
                 if (key.includes('lat') || key.includes('lng') || key.includes('location') || key.includes('round') || key.includes('pano')) {
-                    findCoordsInObj(obj[key], depth + 1);
+                    if (findCoordsInJson(obj[key], depth + 1)) return true;
                 }
             }
         }
+        return false;
     }
+
+    const origXHR = window.XMLHttpRequest.prototype.open;
+    window.XMLHttpRequest.prototype.open = function (...args) {
+        const method = String(args[0] || "").toUpperCase();
+        const url = String(args[1] || "");
+
+        if (method === 'POST' &&
+            url.startsWith('https://maps.googleapis.com/$rpc/google.internal.maps.mapsjs.v1.MapsJsInternalService/')) {
+            this.addEventListener('load', function () {
+                try { extractFromGoogleMaps(this.responseText); } catch (e) { }
+            });
+        }
+
+        if (url.includes("/api/") || url.includes("geoguessr.com")) {
+            this.addEventListener('load', function () {
+                try { extractFromJsonResponse(this.responseText, url); } catch (e) { }
+            });
+        }
+
+        return origXHR.apply(this, args);
+    };
 
     const origFetch = window.fetch;
     window.fetch = async function (...args) {
         const input = args[0];
         const url = typeof input === "string" ? input : (input && input.url ? input.url : "");
         const res = await origFetch.apply(this, args);
-
         try {
             const clone = res.clone();
             if (url.includes("maps.googleapis.com") && (url.includes("GetMetadata") || url.includes("SingleImageSearch"))) {
-                clone.text().then(text => inspectGoogleMapsText(text));
+                clone.text().then(text => extractFromGoogleMaps(text));
             } else if (url.includes("/api/") || url.includes("geoguessr.com")) {
-                clone.text().then(text => inspectText(text, url));
+                clone.text().then(text => extractFromJsonResponse(text, url));
             }
         } catch (e) { }
-
         return res;
-    };
-
-    const origXHR = window.XMLHttpRequest.prototype.open;
-    window.XMLHttpRequest.prototype.open = function (...args) {
-        const url = String(args[1] || "");
-        this.addEventListener('load', function () {
-            try {
-                if (url.includes("maps.googleapis.com") && (url.includes("GetMetadata") || url.includes("SingleImageSearch"))) {
-                    inspectGoogleMapsText(this.responseText);
-                } else if (url.includes("/api/") || url.includes("geoguessr.com")) {
-                    inspectText(this.responseText, url);
-                }
-            } catch (e) { }
-        });
-        return origXHR.apply(this, args);
     };
 
     window.addEventListener("pnj_loc_upd", (e) => {
         if (e && e.detail) rememberLocation(e.detail);
     });
 
-    // ----------------------------------------------------
-    // Exact Placement Logic & Offset Math
-    // ----------------------------------------------------
     function nearbyCoord(coord, scoreRange = {}) {
         const minScore = Math.max(0, Math.min(5000, Number(scoreRange.min ?? state.minScore)));
         const maxScore = Math.max(0, Math.min(5000, Number(scoreRange.max ?? state.maxScore)));
@@ -530,7 +542,6 @@
             return;
         }
 
-        // 1. Prioritize Extension Handler if Extension is installed & active
         if (typeof window.__pnjCmdPlace === "function") {
             const rangeOpts = mode === "exact" ? { scoreRange: { min: 5000, max: 5000 } } : { scoreRange: { min: state.minScore, max: state.maxScore } };
             window.__pnjCmdPlace(coord, mode === "exact" ? "exact" : "nearby", rangeOpts);
@@ -538,7 +549,6 @@
             return;
         }
 
-        // 2. Standalone Engine Execution
         const target = mode === "exact" ? coord : nearbyCoord(coord, { min: state.minScore, max: state.maxScore });
 
         if (placeViaReactMap(target)) {
@@ -559,9 +569,6 @@
         console.log(`[GeoGuessr Assistant] Placed pin (${mode}) at:`, target);
     }
 
-    // ----------------------------------------------------
-    // Build PNJ UI Matching Extension Popup HTML/CSS 100%
-    // ----------------------------------------------------
     function createUI() {
         if (document.getElementById("pnj-standalone-panel")) return;
 
@@ -802,7 +809,6 @@
 
         document.body.appendChild(container);
 
-        // Draggable
         const header = document.getElementById("pnj-header");
         let isDragging = false, offset = [0, 0];
         header.addEventListener("mousedown", (e) => {
@@ -820,7 +826,6 @@
             isDragging = false;
         });
 
-        // Toggle UI
         document.getElementById("pnj-toggle-btn").addEventListener("click", () => {
             const body = document.getElementById("pnj-body");
             state.uiCollapsed = !state.uiCollapsed;
@@ -828,7 +833,6 @@
             document.getElementById("pnj-toggle-btn").textContent = state.uiCollapsed ? "▲" : "▼";
         });
 
-        // Inputs & Dual Slider Binding (100% Exact to Extension popup.js)
         const minInp = document.getElementById("pnj-min-val");
         const maxInp = document.getElementById("pnj-max-val");
         const sliderMin = document.getElementById("pnj-slider-min");
@@ -964,12 +968,10 @@
             botBtn.classList.toggle("on", state.autoBot);
         });
 
-        // Initialize Map Frame if current location is available
         const currentCoord = getCurrentCoord();
         if (currentCoord) updateMapFrame(currentCoord);
     }
 
-    // Auto-Bot Loop
     function findBtnPartial(keywords) {
         const btns = document.querySelectorAll('button, a, [role="button"]');
         for (let btn of btns) {

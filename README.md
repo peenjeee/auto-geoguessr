@@ -6,6 +6,7 @@ Tampermonkey userscript for GeoGuessr. It reads the active round location, shows
 
 - **COPY ID**: copies the `pnj_user_id` used by the web resolver tools.
 - **Panel toggle**: use the **Insert** hotkey or **Hide / Show PNJ Panel (Insert)** from the Tampermonkey script menu.
+- **Quick copy ID**: use **Ctrl+Shift+C** to copy your ID instantly without opening the panel.
 - **Web telemetry**: sends the active round location to:
   - `http://localhost:3000/api/telemetry`
   - `https://gr.0xpnj.dev/api/telemetry`
