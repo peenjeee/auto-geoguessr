@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PNJ GeoGuessr Tools
 // @namespace    http://tampermonkey.net/
-// @version      7.3
+// @version      7.5
 // @description  Full-featured GeoGuessr helper.
 // @author       Peenjeee
 // @match        https://www.geoguessr.com/*
@@ -152,6 +152,7 @@
     }
 
     function broadcastToWeb(coord, targetScore = 5000, distanceKm = 0) {
+        const quality = state.currentQuality || 0;
         const payload = JSON.stringify({
             type: "round_update",
             userId,
@@ -159,7 +160,10 @@
             lat: coord.lat,
             lng: coord.lng,
             targetScore: targetScore,
-            distanceKm: distanceKm
+            distanceKm: distanceKm,
+            capturedAt: Date.now(),
+            quality,
+            source: quality >= 3 ? "panorama" : quality === 2 ? "anchored" : "json"
         });
 
         TELEMETRY_URLS.forEach((url) => {
@@ -327,6 +331,7 @@
 
         const mapPanel = document.getElementById("pnj-map-panel");
         const mapContainer = document.getElementById("pnj-map-container");
+        const wasHidden = Boolean(mapPanel?.hidden);
         if (mapPanel) mapPanel.hidden = false;
         if (!mapContainer) return;
 
@@ -370,10 +375,11 @@
 
         if (mapKey !== lastMapKey) {
             lastMapKey = mapKey;
-            maplibreMap.setCenter([coord.lng, coord.lat]);
-            maplibreMap.setZoom(7);
             if (maplibreMarker) maplibreMarker.setLngLat([coord.lng, coord.lat]);
-            maplibreMap.resize();
+            // One synchronous camera update avoids two render passes from setCenter +
+            // setZoom. Only resize when the map has just become visible.
+            maplibreMap.jumpTo({ center: [coord.lng, coord.lat], zoom: 7 });
+            if (wasHidden) requestAnimationFrame(() => maplibreMap?.resize());
         }
     }
 
@@ -432,12 +438,24 @@
     function wrapStreetViewClass(OrigSV) {
         function PatchedSV(...args) {
             const instance = new OrigSV(...args);
-            instance.addListener("position_changed", () => {
-                const pos = instance.getPosition();
-                if (pos && typeof pos.lat === "function") {
+            resetRoundLock();
+
+            const capturePosition = () => {
+                const pos = typeof instance.getPosition === "function" ? instance.getPosition() : null;
+                if (pos && typeof pos.lat === "function" && typeof pos.lng === "function") {
                     rememberLocation({ lat: pos.lat(), lng: pos.lng() }, 3);
                 }
-            });
+            };
+
+            if (typeof instance.addListener === "function") {
+                instance.addListener("position_changed", capturePosition);
+                instance.addListener("pano_changed", capturePosition);
+            }
+
+            // The constructor can receive its initial position before our listener exists.
+            capturePosition();
+            queueMicrotask(capturePosition);
+            setTimeout(capturePosition, 0);
             return instance;
         }
         Object.setPrototypeOf(PatchedSV, OrigSV);
@@ -538,14 +556,8 @@
                 }
             }
 
-            const pattern = /-?\d{1,2}\.\d{3,},-?\d{1,3}\.\d{3,}/g;
-            while ((match = pattern.exec(text)) !== null) {
-                const [lat, lng] = match[0].split(",").map(Number);
-                if (!isJunkCoord(lat, lng)) {
-                    rememberLocation({ lat, lng }, 1);
-                    return true;
-                }
-            }
+            // Arbitrary decimal pairs in Maps RPC payloads may be viewport, camera or
+            // tile coordinates rather than the active panorama position.
         } catch (e) { }
         return false;
     }
@@ -1238,6 +1250,13 @@
 
     let roundOverSeen = false;
     let lastPath = location.pathname;
+
+    document.addEventListener("click", (event) => {
+        const control = event.target?.closest?.(
+            '[data-qa="close-round-result"], [data-qa="play-next-round"]'
+        );
+        if (control) resetRoundLock();
+    }, true);
 
     setInterval(() => {
         const c = getCurrentCoord();
