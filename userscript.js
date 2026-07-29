@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PNJ GeoGuessr Tools
 // @namespace    http://tampermonkey.net/
-// @version      7.5
+// @version      7.6
 // @description  Full-featured GeoGuessr helper.
 // @author       Peenjeee
 // @match        https://www.geoguessr.com/*
@@ -23,7 +23,7 @@
 (function () {
     'use strict';
 
-    console.log("PNJ GeoGuessr Userscript v7.3 Loaded!");
+    console.log("PNJ GeoGuessr Userscript v7.6 Loaded!");
 
     try {
         localStorage.removeItem("pnj_rnd_loc");
@@ -228,9 +228,118 @@
         return false;
     }
 
+    function asNumber(value) {
+        const number = Number(value);
+        return Number.isFinite(number) ? number : null;
+    }
+
+    function pickNumber(object, keys) {
+        for (const key of keys) {
+            if (!Object.prototype.hasOwnProperty.call(object, key)) continue;
+            const number = asNumber(object[key]);
+            if (number !== null) return number;
+        }
+        return null;
+    }
+
+    function isCoord(value) {
+        return value &&
+            Number.isFinite(value.lat) &&
+            Number.isFinite(value.lng) &&
+            Math.abs(value.lat) <= 90 &&
+            Math.abs(value.lng) <= 180;
+    }
+
+    function coordFromObject(object) {
+        if (!object || typeof object !== "object") return null;
+        const lat = pickNumber(object, ["lat", "latitude"]);
+        const lng = pickNumber(object, ["lng", "lon", "long", "longitude"]);
+        if (!isCoord({ lat, lng }) || isJunkCoord(lat, lng)) return null;
+        return { lat, lng };
+    }
+
+    function pathScore(path, url) {
+        const urlText = String(url || "").toLowerCase();
+        const pathText = path.join(".").toLowerCase();
+        let score = 0;
+
+        if (/round|game|challenge|duel/.test(urlText)) score += 4;
+        if (/answer|correct|location|pano/.test(urlText)) score += 4;
+        if (/round/.test(pathText)) score += 10;
+        if (/answer|correct|location|pano/.test(pathText)) score += 10;
+        if (/guess|pin|player|participant|bounds|viewport|mapbounds/.test(pathText)) score -= 20;
+        if (/map/.test(pathText) && !/round|answer|pano/.test(pathText)) score -= 10;
+        if (/\/maps?\//.test(urlText)) score -= 6;
+
+        return score;
+    }
+
+    function roundFromPath(path, object) {
+        const explicit = pickNumber(object, ["round", "roundNumber", "roundIndex"]);
+        if (explicit !== null) return explicit > 0 ? explicit : explicit + 1;
+
+        const roundsIndex = path.indexOf("rounds");
+        if (roundsIndex !== -1 && Number.isInteger(path[roundsIndex + 1])) {
+            return path[roundsIndex + 1] + 1;
+        }
+        return null;
+    }
+
+    function collectCoords(value, url, path = [], seen = new WeakSet(), found = [], depth = 0) {
+        if (depth > 30 || !value || typeof value !== "object" || seen.has(value)) return found;
+        seen.add(value);
+
+        const coord = coordFromObject(value);
+        if (coord) {
+            const score = pathScore(path, url);
+            if (score > 0) {
+                found.push({ ...coord, round: roundFromPath(path, value), score });
+            }
+        }
+
+        if (Array.isArray(value)) {
+            value.forEach((item, index) => collectCoords(item, url, path.concat(index), seen, found, depth + 1));
+        } else {
+            Object.entries(value).forEach(([key, item]) =>
+                collectCoords(item, url, path.concat(key), seen, found, depth + 1));
+        }
+        return found;
+    }
+
+    function rememberLocations(candidates) {
+        if (!candidates.length || (state.currentQuality || 0) > 1) return;
+
+        candidates
+            .sort((left, right) => left.score - right.score)
+            .forEach((coord) => {
+                const existing = state.locations.find(
+                    (item) =>
+                        Math.abs(item.lat - coord.lat) < 0.000001 &&
+                        Math.abs(item.lng - coord.lng) < 0.000001 &&
+                        item.round === coord.round
+                );
+
+                if (!existing) {
+                    state.locations.push({
+                        lat: coord.lat,
+                        lng: coord.lng,
+                        round: coord.round || null,
+                        source: "json",
+                    });
+                }
+                state.current = existing || state.locations[state.locations.length - 1];
+            });
+
+        state.locations = state.locations.slice(-20);
+        state.currentQuality = 1;
+        state.currentAt = Date.now();
+        if (window.__pnjState) window.__pnjState.current = state.current;
+        updateMapFrame(state.current);
+        broadcastToWeb(state.current);
+    }
+
     function rememberLocation(coord, quality = 1) {
-        if (!coord || typeof coord.lat !== "number" || typeof coord.lng !== "number") return;
-        if (isJunkCoord(coord.lat, coord.lng)) return;
+        if (!isCoord(coord) || isJunkCoord(coord.lat, coord.lng)) return;
 
         const now = Date.now();
         // The round's location never changes, so once a panorama or anchored fix is in,
@@ -541,109 +650,134 @@
         return null;
     }
 
-    function extractFromGoogleMaps(text) {
-        if (!text || typeof text !== 'string') return false;
+    function inspectGoogleMapsText(text) {
+        const str = String(text || "");
+        let match;
+        const anchored = /null,null,(-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)/g;
+
+        while ((match = anchored.exec(str)) !== null) {
+            const lat = Number(match[1]);
+            const lng = Number(match[2]);
+            if (Math.abs(lng) <= 180 && !isJunkCoord(lat, lng)) {
+                rememberLocation({ lat, lng }, 2);
+                return;
+            }
+        }
+    }
+
+    function inspectText(text, url) {
+        if (!text || !/[{[]/.test(text[0])) return;
         try {
-            let match;
-
-            const anchored = /null,null,(-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)/g;
-            while ((match = anchored.exec(text)) !== null) {
-                const lat = Number(match[1]);
-                const lng = Number(match[2]);
-                if (!isJunkCoord(lat, lng)) {
-                    rememberLocation({ lat, lng }, 2);
-                    return true;
-                }
+            const json = JSON.parse(text);
+            const bounds = extractBounds(json);
+            if (bounds && bounds.min && bounds.max) {
+                const diagonal = distanceKm(bounds.min.lat, bounds.min.lng, bounds.max.lat, bounds.max.lng);
+                state.mapScale = diagonal > 15000 ? 1492.7 : Math.max(5, diagonal / 10);
             }
 
-            // Arbitrary decimal pairs in Maps RPC payloads may be viewport, camera or
-            // tile coordinates rather than the active panorama position.
+            const activeRound = json && typeof json === "object"
+                ? (json.round || (json.payload && json.payload.round) || null)
+                : null;
+            const candidates = collectCoords(json, url);
+            if (activeRound !== null) {
+                candidates.forEach((candidate) => {
+                    if (candidate.round === activeRound) candidate.score += 1000;
+                });
+            }
+            rememberLocations(candidates);
         } catch (e) { }
-        return false;
     }
 
-    function extractFromJsonResponse(text, url = "") {
-        if (!text || typeof text !== 'string') return false;
-        if (/bounds|viewport|mapbounds|tile|vt\/|staticmap|guess/.test(url.toLowerCase())) return false;
-        try {
-            if (text.startsWith('{') || text.startsWith('[')) {
-                const json = JSON.parse(text);
-                const bounds = extractBounds(json);
-                if (bounds && bounds.min && bounds.max) {
-                    const diagonal = distanceKm(bounds.min.lat, bounds.min.lng, bounds.max.lat, bounds.max.lng);
-                    state.mapScale = diagonal > 15000 ? 1492.7 : Math.max(5, diagonal / 10);
-                }
-                return findCoordsInJson(json);
-            }
-        } catch (e) { }
-        return false;
-    }
-
-    function findCoordsInJson(obj, depth = 0) {
-        if (depth > 25 || !obj || typeof obj !== 'object') return false;
-        if (typeof obj.lat === 'number' && typeof obj.lng === 'number') {
-            if (!isJunkCoord(obj.lat, obj.lng)) {
-                rememberLocation({ lat: obj.lat, lng: obj.lng }, 1);
-                return true;
-            }
-        }
-        if (Array.isArray(obj)) {
-            for (let item of obj) { if (findCoordsInJson(item, depth + 1)) return true; }
-        } else {
-            for (let key in obj) {
-                if (key.includes('lat') || key.includes('lng') || key.includes('location') || key.includes('round') || key.includes('pano')) {
-                    if (findCoordsInJson(obj[key], depth + 1)) return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    const origXHR = window.XMLHttpRequest.prototype.open;
-    window.XMLHttpRequest.prototype.open = function (...args) {
-        const method = String(args[0] || "").toUpperCase();
-        const url = String(args[1] || "");
-
-        const isMapsRpc = method === 'POST' &&
-            url.startsWith('https://maps.googleapis.com/$rpc/google.internal.maps.mapsjs.v1.MapsJsInternalService/');
-        const isPanoLookup = url.includes("maps.googleapis.com") &&
-            (url.includes("GetMetadata") || url.includes("SingleImageSearch"));
-
-        if (isMapsRpc || isPanoLookup) {
-            this.addEventListener('load', function () {
-                try { extractFromGoogleMaps(this.responseText); } catch (e) { }
-            });
-        }
-
-        if (url.includes("/api/") || url.includes("geoguessr.com")) {
-            this.addEventListener('load', function () {
-                try { extractFromJsonResponse(this.responseText, url); } catch (e) { }
-            });
-        }
-
-        return origXHR.apply(this, args);
+    window.__pnjHandlers = {
+        googleText: inspectGoogleMapsText,
+        jsonText: inspectText,
+        jsonObject: (object, url) => rememberLocations(collectCoords(object, url)),
     };
 
-    const origFetch = window.fetch;
-    window.fetch = async function (...args) {
-        const input = args[0];
-        const url = typeof input === "string" ? input : (input && input.url ? input.url : "");
-        const res = await origFetch.apply(this, args);
-        // Clone ONLY what we actually read. An unread clone keeps a full duplicate of the
-        // body buffered for the response's lifetime, and tiles/images/styles flow through
-        // here constantly — cloning them all leaks memory across a long session.
-        try {
-            const isPano = url.includes("maps.googleapis.com") &&
-                (url.includes("GetMetadata") || url.includes("SingleImageSearch"));
-            const isGeoApi = !isPano && (url.includes("/api/") || url.includes("geoguessr.com"));
-            if (isPano) {
-                res.clone().text().then(text => extractFromGoogleMaps(text)).catch(() => { });
-            } else if (isGeoApi) {
-                res.clone().text().then(text => extractFromJsonResponse(text, url)).catch(() => { });
+    const patchedGlobals = (window.__pnjPatched = window.__pnjPatched || new WeakSet());
+
+    function patchXhr() {
+        if (typeof window.XMLHttpRequest !== "function" || patchedGlobals.has(window.XMLHttpRequest)) return;
+
+        window.XMLHttpRequest = new Proxy(window.XMLHttpRequest, {
+            construct(target, args) {
+                const xhr = new target(...args);
+                let method = "";
+                let url = "";
+
+                xhr.open = new Proxy(xhr.open, {
+                    apply(openTarget, openThisArg, openArgs) {
+                        method = String(openArgs[0] || "").toUpperCase();
+                        url = String(openArgs[1] || "");
+                        return Reflect.apply(openTarget, openThisArg, openArgs);
+                    }
+                });
+
+                xhr.addEventListener("load", () => {
+                    const isMapsRpc = method === "POST" &&
+                        url.startsWith("https://maps.googleapis.com/$rpc/google.internal.maps.mapsjs.v1.MapsJsInternalService/");
+                    const isPanoLookup = url.includes("maps.googleapis.com") &&
+                        (url.includes("GetMetadata") || url.includes("SingleImageSearch"));
+
+                    if (isMapsRpc || isPanoLookup) {
+                        let body = "";
+                        try {
+                            body = typeof xhr.response === "string" ? xhr.response : JSON.stringify(xhr.response) || "";
+                        } catch (e) { }
+                        if (!body || body === "null") {
+                            try { body = String(xhr.responseText || ""); } catch (e) { }
+                        }
+                        window.__pnjHandlers.googleText(body);
+                        return;
+                    }
+
+                    const type = xhr.getResponseHeader("content-type") || "";
+                    if (type && !type.includes("json")) return;
+                    if (xhr.response && typeof xhr.response === "object") {
+                        window.__pnjHandlers.jsonObject(xhr.response, url);
+                        return;
+                    }
+                    try {
+                        window.__pnjHandlers.jsonText(String(xhr.responseText || "").trim(), url);
+                    } catch (e) { }
+                });
+                return xhr;
             }
-        } catch (e) { }
-        return res;
-    };
+        });
+        patchedGlobals.add(window.XMLHttpRequest);
+    }
+
+    function patchFetch() {
+        if (typeof window.fetch !== "function" || patchedGlobals.has(window.fetch)) return;
+
+        window.fetch = new Proxy(window.fetch, {
+            apply(target, thisArg, args) {
+                const input = args[0];
+                const url = typeof input === "string" ? input : input && input.url;
+                const request = Reflect.apply(target, thisArg, args);
+
+                request.then((response) => {
+                    const copy = response.clone();
+                    const type = copy.headers && copy.headers.get("content-type");
+                    if (url && url.includes("maps.googleapis.com") &&
+                        (url.includes("GetMetadata") || url.includes("SingleImageSearch"))) {
+                        copy.text().then(window.__pnjHandlers.googleText).catch(() => { });
+                        return;
+                    }
+                    if (!type || type.includes("json")) {
+                        copy.text()
+                            .then((text) => window.__pnjHandlers.jsonText(text.trim(), url))
+                            .catch(() => { });
+                    }
+                }).catch(() => { });
+                return request;
+            }
+        });
+        patchedGlobals.add(window.fetch);
+    }
+
+    patchXhr();
+    patchFetch();
 
     window.addEventListener("pnj_loc_upd", (e) => {
         if (e && e.detail) rememberLocation(e.detail);
