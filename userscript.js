@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PNJ GeoGuessr Tools
 // @namespace    http://tampermonkey.net/
-// @version      7.7
+// @version      7.8
 // @description  Full-featured GeoGuessr helper.
 // @author       Peenjeee
 // @match        https://www.geoguessr.com/*
@@ -24,7 +24,7 @@
 (function () {
     'use strict';
 
-    console.log("PNJ GeoGuessr Userscript v7.7 Loaded!");
+    console.log("PNJ GeoGuessr Userscript v7.8 Loaded!");
 
     try {
         localStorage.removeItem("pnj_rnd_loc");
@@ -848,8 +848,7 @@
         return { gameId: null, selfId, round: 0, opponents: {} };
     }
 
-    // Unlike isJunkCoord this accepts a pin anywhere on the map. Only 0,0 is refused,
-    // because a coordinate the server withholds may arrive as zeros.
+    // Unlike isJunkCoord this accepts a pin anywhere on the map; only 0,0 is refused.
     function opponentCoord(value) {
         if (!isCoord(value) || (value.lat === 0 && value.lng === 0)) return null;
         return { lat: value.lat, lng: value.lng };
@@ -906,7 +905,9 @@
         const known = previous || NO_OPPONENT;
         const guesses = Array.isArray(player.guesses) ? player.guesses : [];
         const entry = guesses.find((guess) => guess?.roundNumber === round);
-        const reported = entry ? opponentCoord(entry) || HIDDEN_GUESS : null;
+        // Until the round ends the server masks an opponent's guess with a stand-in coordinate
+        // and a null score, so only a scored guess carries the real location.
+        const reported = entry ? (Number.isFinite(entry.score) && opponentCoord(entry)) || HIDDEN_GUESS : null;
 
         return {
             pin: opponentCoord(player.pin) || known.pin,

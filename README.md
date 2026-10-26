@@ -11,7 +11,7 @@ Tampermonkey userscript for GeoGuessr. It reads the active round location, shows
   - `http://localhost:3000/api/telemetry`
   - `https://gr.0xpnj.dev/api/telemetry`
 - **Map preview**: shows a preview of the active round location.
-- **Opponent pin (Duels / Team Duels)**: shows the opponent's live pin and submitted guess on the map preview next to the round answer, with distance and estimated score, and sends it to the web resolver. GeoGuessr only streams the live pin to you after you have guessed.
+- **Opponent guess (Duels / Team Duels)**: shows the moment the opponent guesses, then their guess on the map preview next to the round answer, with distance and estimated score, once GeoGuessr reveals it at the end of the round, and sends it to the web resolver. Ranked duels never send an opponent's unsubmitted pin; if GeoGuessr streams one, it is shown live too.
 - **Place exact / range**: places an exact pin or a range-based pin.
 - **Auto Bot Mode**: automatically places guesses and continues rounds.
 
