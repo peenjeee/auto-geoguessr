@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PNJ GeoGuessr Tools
 // @namespace    http://tampermonkey.net/
-// @version      7.9
+// @version      8.0
 // @description  Full-featured GeoGuessr helper.
 // @author       Peenjeee
 // @match        https://www.geoguessr.com/*
@@ -24,7 +24,11 @@
 (function () {
     'use strict';
 
-    console.log("PNJ GeoGuessr Userscript v7.9 Loaded!");
+    // With any @grant, Tampermonkey runs this script against a sandboxed `window`. The game,
+    // Google Maps and their requests all use the page's own window, so every hook goes there.
+    const pageWindow = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+
+    console.log("PNJ GeoGuessr Userscript v8.0 Loaded!");
 
     try {
         localStorage.removeItem("pnj_rnd_loc");
@@ -771,7 +775,7 @@
         if (current) onValue(current);
     }
 
-    hookNamespace(window, "google", (google) => {
+    hookNamespace(pageWindow, "google", (google) => {
         if (google && typeof google === "object") {
             hookNamespace(google, "maps", (maps) => {
                 if (maps && typeof maps === "object") patchSvClass(maps);
@@ -780,9 +784,10 @@
     });
 
     function patchStreetView() {
-        if (window.google && window.google.maps &&
-            window.google.maps.StreetViewPanorama && !window.google.maps.StreetViewPanorama.__pnjPatched) {
-            patchSvClass(window.google.maps);
+        const google = pageWindow.google;
+        if (google && google.maps &&
+            google.maps.StreetViewPanorama && !google.maps.StreetViewPanorama.__pnjPatched) {
+            patchSvClass(google.maps);
         }
     }
     setInterval(patchStreetView, 1000);
@@ -1049,9 +1054,9 @@
     const patchedGlobals = (window.__pnjPatched = window.__pnjPatched || new WeakSet());
 
     function patchXhr() {
-        if (typeof window.XMLHttpRequest !== "function" || patchedGlobals.has(window.XMLHttpRequest)) return;
+        if (typeof pageWindow.XMLHttpRequest !== "function" || patchedGlobals.has(pageWindow.XMLHttpRequest)) return;
 
-        window.XMLHttpRequest = new Proxy(window.XMLHttpRequest, {
+        pageWindow.XMLHttpRequest = new Proxy(pageWindow.XMLHttpRequest, {
             construct(target, args) {
                 const xhr = new target(...args);
                 let method = "";
@@ -1096,13 +1101,13 @@
                 return xhr;
             }
         });
-        patchedGlobals.add(window.XMLHttpRequest);
+        patchedGlobals.add(pageWindow.XMLHttpRequest);
     }
 
     function patchFetch() {
-        if (typeof window.fetch !== "function" || patchedGlobals.has(window.fetch)) return;
+        if (typeof pageWindow.fetch !== "function" || patchedGlobals.has(pageWindow.fetch)) return;
 
-        window.fetch = new Proxy(window.fetch, {
+        pageWindow.fetch = new Proxy(pageWindow.fetch, {
             apply(target, thisArg, args) {
                 const input = args[0];
                 const url = typeof input === "string" ? input : input && input.url;
@@ -1125,7 +1130,7 @@
                 return request;
             }
         });
-        patchedGlobals.add(window.fetch);
+        patchedGlobals.add(pageWindow.fetch);
     }
 
     function isGameServerUrl(url) {
@@ -1158,10 +1163,7 @@
         });
     }
 
-    // With any @grant the script's `window` is a sandbox, while the game opens its socket
-    // through the page's own constructor, so that is the one to wrap.
     function patchWebSocket() {
-        const pageWindow = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
         if (typeof pageWindow.WebSocket !== "function" || patchedGlobals.has(pageWindow.WebSocket)) return;
 
         pageWindow.WebSocket = new Proxy(pageWindow.WebSocket, {
