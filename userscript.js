@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PNJ GeoGuessr Tools
 // @namespace    http://tampermonkey.net/
-// @version      7.6
+// @version      7.7
 // @description  Full-featured GeoGuessr helper.
 // @author       Peenjeee
 // @match        https://www.geoguessr.com/*
@@ -11,6 +11,7 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_addStyle
 // @grant        GM_getResourceText
+// @grant        unsafeWindow
 // @require      https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js
 // @resource     maplibreCss https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css
 // @connect      localhost
@@ -18,12 +19,12 @@
 // @connect      gr.0xpnj.dev
 // ==/UserScript==
 
-/* global maplibregl */
+/* global maplibregl, unsafeWindow */
 
 (function () {
     'use strict';
 
-    console.log("PNJ GeoGuessr Userscript v7.6 Loaded!");
+    console.log("PNJ GeoGuessr Userscript v7.7 Loaded!");
 
     try {
         localStorage.removeItem("pnj_rnd_loc");
@@ -44,14 +45,17 @@
         autoBot: false,
         mapScale: null,
         minScore: savedScoreRange.min,
-        maxScore: savedScoreRange.max
+        maxScore: savedScoreRange.max,
+        duel: emptyDuel()
     });
 
     if (!Number.isFinite(state.minScore) || state.minScore < 0) state.minScore = savedScoreRange.min;
     if (!Number.isFinite(state.maxScore) || state.maxScore <= 0) state.maxScore = savedScoreRange.max;
+    if (!state.duel) state.duel = emptyDuel();
 
     let lastMapKey = "";
     const TELEMETRY_URLS = ["http://localhost:3000/api/telemetry", "https://gr.0xpnj.dev/api/telemetry"];
+    const MAX_TELEMETRY_OPPONENTS = 8;
     const DASHBOARD_URL = "https://gr.0xpnj.dev/";
     const USER_ID_KEY = "pnj_user_id";
     const USER_TOKEN_KEY = "pnj_user_token";
@@ -151,20 +155,8 @@
         return cleanFetch(url, options);
     }
 
-    function broadcastToWeb(coord, targetScore = 5000, distanceKm = 0) {
-        const quality = state.currentQuality || 0;
-        const payload = JSON.stringify({
-            type: "round_update",
-            userId,
-            token: userToken,
-            lat: coord.lat,
-            lng: coord.lng,
-            targetScore: targetScore,
-            distanceKm: distanceKm,
-            capturedAt: Date.now(),
-            quality,
-            source: quality >= 3 ? "panorama" : quality === 2 ? "anchored" : "json"
-        });
+    function sendTelemetry(message) {
+        const payload = JSON.stringify(message);
 
         TELEMETRY_URLS.forEach((url) => {
             if (typeof GM_xmlhttpRequest === "function") {
@@ -192,6 +184,41 @@
             channel.postMessage(JSON.parse(payload));
             channel.close();
         } catch (e) { }
+    }
+
+    function broadcastToWeb(coord, targetScore = 5000, distanceKm = 0) {
+        const quality = state.currentQuality || 0;
+        sendTelemetry({
+            type: "round_update",
+            userId,
+            token: userToken,
+            lat: coord.lat,
+            lng: coord.lng,
+            targetScore: targetScore,
+            distanceKm: distanceKm,
+            capturedAt: Date.now(),
+            quality,
+            source: quality >= 3 ? "panorama" : quality === 2 ? "anchored" : "json"
+        });
+    }
+
+    // Opponent ids are positional: the GeoGuessr playerIds never leave the page.
+    function broadcastOpponents(view) {
+        sendTelemetry({
+            type: "opponent_update",
+            userId,
+            token: userToken,
+            capturedAt: Date.now(),
+            round: view.round,
+            opponents: view.opponents.slice(0, MAX_TELEMETRY_OPPONENTS).map((opponent, index) => ({
+                id: `opponent-${index + 1}`,
+                status: opponent.status,
+                lat: opponent.lat,
+                lng: opponent.lng,
+                distanceKm: opponent.distanceKm,
+                score: opponent.score
+            }))
+        });
     }
 
     function loadScoreRange() {
@@ -334,6 +361,7 @@
         state.currentQuality = 1;
         state.currentAt = Date.now();
         if (window.__pnjState) window.__pnjState.current = state.current;
+        publishOpponents();
         updateMapFrame(state.current);
         broadcastToWeb(state.current);
     }
@@ -371,6 +399,7 @@
         state.locations.push(coord);
         if (state.locations.length > 20) state.locations.shift();
 
+        publishOpponents();
         updateMapFrame(coord);
         broadcastToWeb(coord);
     }
@@ -385,6 +414,18 @@
     let maplibreMap = null;
     let maplibreMarker = null;
     let maplibreCssReady = false;
+
+    // Opponents the last published view put on the map, keyed by playerId. The status
+    // decides how an opponent is drawn: a dot with a label chip, or a one-line note when
+    // the server withholds the coordinates.
+    const OPPONENT_MARKER_KIND = { pin: "Pin", guess: "Guess" };
+    const OPPONENT_NOTE = {
+        guessed: "Opponent guessed · coordinates hidden",
+        waiting: "Opponent · no pin yet"
+    };
+    const opponentMarkers = new Map();
+    let shownOpponents = [];
+    let framedBounds = null;
 
     // @require loads MapLibre into the userscript scope; fall back to the page global for
     // managers that skip @require or when the script is pasted into a console.
@@ -434,15 +475,142 @@
         return el;
     }
 
+    function createOpponentMarker(gl, opponent) {
+        const element = document.createElement("div");
+        element.className = "pnj-opp-marker";
+        const dot = document.createElement("div");
+        dot.className = "pnj-opp-dot";
+        const chip = document.createElement("div");
+        chip.className = "pnj-opp-chip";
+        element.append(dot, chip);
+
+        const marker = new gl.Marker({ element, anchor: "center" })
+            .setLngLat([opponent.lng, opponent.lat])
+            .addTo(maplibreMap);
+        return { marker, chip };
+    }
+
+    function opponentLabel({ status, distanceKm, score }) {
+        const kind = OPPONENT_MARKER_KIND[status];
+        if (distanceKm === null) return kind;
+        return `${kind} · ${Math.round(distanceKm).toLocaleString("en-US")} km · ≈${score.toLocaleString("en-US")}`;
+    }
+
+    function syncOpponentMarkers(gl, placed) {
+        const live = new Set(placed.map((opponent) => opponent.playerId));
+        opponentMarkers.forEach((entry, playerId) => {
+            if (live.has(playerId)) return;
+            entry.marker.remove();
+            opponentMarkers.delete(playerId);
+        });
+
+        placed.forEach((opponent) => {
+            let entry = opponentMarkers.get(opponent.playerId);
+            if (entry) {
+                entry.marker.setLngLat([opponent.lng, opponent.lat]);
+            } else {
+                entry = createOpponentMarker(gl, opponent);
+                opponentMarkers.set(opponent.playerId, entry);
+            }
+            entry.chip.textContent = opponentLabel(opponent);
+        });
+    }
+
+    function renderOpponentNotes(unplaced) {
+        const notes = document.getElementById("pnj-map-notes");
+        if (!notes) return;
+
+        notes.replaceChildren(...unplaced.map((opponent) => {
+            const line = document.createElement("div");
+            line.className = "pnj-opp-note";
+            line.textContent = OPPONENT_NOTE[opponent.status];
+            return line;
+        }));
+        notes.hidden = unplaced.length === 0;
+    }
+
+    function fitMarkers(bounds) {
+        framedBounds = bounds;
+        maplibreMap.fitBounds(bounds, { padding: 40, maxZoom: 7, animate: false });
+    }
+
+    // A hidden card can measure zero-size, in which case a fit fails silently, so the
+    // framing is reapplied once the real size is known.
+    function resizeMap() {
+        if (!maplibreMap) return;
+        maplibreMap.resize();
+        if (framedBounds) fitMarkers(framedBounds);
+    }
+
+    function startMap(gl, container, center) {
+        try {
+            maplibreMap = new gl.Map({
+                container,
+                style: mapcnStyleUrl(),
+                center: [center.lng, center.lat],
+                zoom: 7,
+                attributionControl: false,
+            });
+        } catch (e) {
+            console.warn("[PNJ] MapLibre failed to start:", e);
+            maplibreMap = null;
+            return false;
+        }
+
+        // The card is 150px tall and was hidden until now, so MapLibre may have measured
+        // a zero-size container; resize once the style is in and again after layout.
+        maplibreMap.on("load", resizeMap);
+        setTimeout(resizeMap, 300);
+        return true;
+    }
+
+    function placeAnswerMarker(gl, answer) {
+        if (maplibreMarker) {
+            maplibreMarker.setLngLat([answer.lng, answer.lat]);
+            return;
+        }
+        maplibreMarker = new gl.Marker({ element: createMapcnMarker(), anchor: "center" })
+            .setLngLat([answer.lng, answer.lat])
+            .addTo(maplibreMap);
+    }
+
+    // The overlay is cosmetic: a failure here is reported but must not keep the round
+    // answer from reaching the map and the dashboard.
+    function drawOpponents(gl, points, placed, reframe) {
+        try {
+            syncOpponentMarkers(gl, placed);
+            if (reframe && placed.length) {
+                // Longitudes are unwrapped around the first point so a pair straddling the
+                // antimeridian frames the short way round.
+                const refLng = points[0].lng;
+                const unwrap = (lng) => lng + 360 * Math.round((refLng - lng) / 360);
+                fitMarkers(points.reduce((bounds, point) => bounds.extend([unwrap(point.lng), point.lat]), new gl.LngLatBounds()));
+            }
+        } catch (e) {
+            console.warn("[PNJ] Opponent overlay failed:", e);
+        }
+    }
+
     function updateMapFrame(coord) {
-        if (!coord || typeof coord.lat !== "number" || typeof coord.lng !== "number") return;
+        const answer = coord && typeof coord.lat === "number" && typeof coord.lng === "number" ? coord : null;
+        const opponents = shownOpponents;
+        const placed = opponents.filter((opponent) => OPPONENT_MARKER_KIND[opponent.status]);
+        if (!answer && !opponents.length && !document.getElementById("pnj-map-panel")) return;
         createUI();
 
         const mapPanel = document.getElementById("pnj-map-panel");
         const mapContainer = document.getElementById("pnj-map-container");
         const wasHidden = Boolean(mapPanel?.hidden);
-        if (mapPanel) mapPanel.hidden = false;
+        if (mapPanel && (answer || opponents.length)) mapPanel.hidden = false;
+        renderOpponentNotes(opponents.filter((opponent) => !OPPONENT_MARKER_KIND[opponent.status]));
         if (!mapContainer) return;
+
+        const points = answer ? [answer, ...placed] : placed;
+        if (!points.length) {
+            syncOpponentMarkers(null, []);
+            framedBounds = null;
+            return;
+        }
 
         const gl = getMapLibre();
         if (!gl) {
@@ -452,44 +620,28 @@
 
         ensureMapLibreCss();
 
-        const mapKey = `${coord.lat},${coord.lng}`;
+        const created = !maplibreMap;
+        if (created && !startMap(gl, mapContainer, points[0])) return;
+        if (answer) placeAnswerMarker(gl, answer);
 
-        if (!maplibreMap) {
-            try {
-                maplibreMap = new gl.Map({
-                    container: mapContainer,
-                    style: mapcnStyleUrl(),
-                    center: [coord.lng, coord.lat],
-                    zoom: 7,
-                    attributionControl: false,
-                });
-            } catch (e) {
-                console.warn("[PNJ] MapLibre failed to start:", e);
-                maplibreMap = null;
-                return;
-            }
+        const mapKey = [
+            answer ? `${answer.lat},${answer.lng}` : "",
+            ...placed.map((opponent) => `${opponent.lat},${opponent.lng}`).sort()
+        ].filter(Boolean).join("|");
+        const reframe = created || mapKey !== lastMapKey;
+        lastMapKey = mapKey;
 
-            maplibreMarker = new gl.Marker({ element: createMapcnMarker(), anchor: "center" })
-                .setLngLat([coord.lng, coord.lat])
-                .addTo(maplibreMap);
+        drawOpponents(gl, points, placed, reframe);
+        if (!reframe) return;
 
-            // The card is 150px tall and was hidden until now, so MapLibre may have measured
-            // a zero-size container; resize once the style is in and again after layout.
-            maplibreMap.on("load", () => maplibreMap.resize());
-            setTimeout(() => maplibreMap && maplibreMap.resize(), 300);
-
-            lastMapKey = mapKey;
-            return;
-        }
-
-        if (mapKey !== lastMapKey) {
-            lastMapKey = mapKey;
-            if (maplibreMarker) maplibreMarker.setLngLat([coord.lng, coord.lat]);
+        if (!placed.length) {
+            framedBounds = null;
             // One synchronous camera update avoids two render passes from setCenter +
-            // setZoom. Only resize when the map has just become visible.
-            maplibreMap.jumpTo({ center: [coord.lng, coord.lat], zoom: 7 });
-            if (wasHidden) requestAnimationFrame(() => maplibreMap?.resize());
+            // setZoom. A map created on the answer is already framed.
+            if (!created) maplibreMap.jumpTo({ center: [answer.lng, answer.lat], zoom: 7 });
         }
+        // Only resize when the map has just become visible.
+        if (!created && wasHidden) requestAnimationFrame(resizeMap);
     }
 
     function scanReactDOMForCoord() {
@@ -688,10 +840,197 @@
         } catch (e) { }
     }
 
+    const GAME_SERVER_HOST = /^(gs\d*|game-server)\.geoguessr\.com$/;
+    const HIDDEN_GUESS = "hidden";
+    const NO_OPPONENT = Object.freeze({ pin: null, guess: null });
+
+    function emptyDuel(selfId = null) {
+        return { gameId: null, selfId, round: 0, opponents: {} };
+    }
+
+    // Unlike isJunkCoord this accepts a pin anywhere on the map. Only 0,0 is refused,
+    // because a coordinate the server withholds may arrive as zeros.
+    function opponentCoord(value) {
+        if (!isCoord(value) || (value.lat === 0 && value.lng === 0)) return null;
+        return { lat: value.lat, lng: value.lng };
+    }
+
+    function playersOf(team) {
+        return Array.isArray(team?.players) ? team.players : [];
+    }
+
+    function withSelf(duel, frame) {
+        const playerId = frame.code === "SubscribeToLobby" ? frame.playerId : null;
+        if (typeof playerId !== "string" || !playerId || playerId === duel.selfId) return duel;
+        return { ...duel, selfId: playerId };
+    }
+
+    function applySample(opponent, sample) {
+        const coord = opponentCoord(sample.payload);
+        switch (sample.type) {
+            case "PinPosition":
+                return coord ? { ...opponent, pin: coord } : opponent;
+            case "PinRemove":
+                return { ...opponent, pin: null };
+            case "GuessWithLatLng":
+                return coord ? { ...opponent, guess: coord } : opponent;
+            default:
+                return opponent;
+        }
+    }
+
+    function withLiveSamples(duel, frame) {
+        const playerId = frame.playerId;
+        if (typeof playerId !== "string" || !playerId || playerId === duel.selfId) return duel;
+        if (!Array.isArray(frame.payload)) return duel;
+        if (duel.gameId && !Object.prototype.hasOwnProperty.call(duel.opponents, playerId)) return duel;
+
+        const samples = frame.payload
+            .filter((sample) => sample && typeof sample === "object")
+            .sort((left, right) => (Number(left.time) || 0) - (Number(right.time) || 0));
+        const previous = duel.opponents[playerId] || NO_OPPONENT;
+        const next = samples.reduce(applySample, previous);
+        if (next === previous) return duel;
+        return { ...duel, opponents: { ...duel.opponents, [playerId]: next } };
+    }
+
+    // The stream can hand over a guess before the state push stops hiding it, so a
+    // coordinate already seen is never downgraded to "hidden".
+    function mergeGuess(known, reported) {
+        if (reported && reported !== HIDDEN_GUESS) return reported;
+        if (known && known !== HIDDEN_GUESS) return known;
+        return reported || known;
+    }
+
+    function opponentFromPlayer(player, previous, round) {
+        const known = previous || NO_OPPONENT;
+        const guesses = Array.isArray(player.guesses) ? player.guesses : [];
+        const entry = guesses.find((guess) => guess?.roundNumber === round);
+        const reported = entry ? opponentCoord(entry) || HIDDEN_GUESS : null;
+
+        return {
+            pin: opponentCoord(player.pin) || known.pin,
+            guess: mergeGuess(known.guess, reported),
+        };
+    }
+
+    // Every state push is the full duel state, so the opponent set is rebuilt from it:
+    // teammates that arrived through the stream drop out as soon as a push shows the teams,
+    // and withLiveSamples accepts no new player once a push has named them.
+    function withDuelState(duel, duelState) {
+        if (!duel.selfId || typeof duelState.gameId !== "string" || !Array.isArray(duelState.teams)) return duel;
+
+        const base = !duel.gameId || duel.gameId === duelState.gameId ? duel : emptyDuel(duel.selfId);
+        const round = Number.isFinite(duelState.currentRoundNumber) ? duelState.currentRoundNumber : base.round;
+        const previous = base.round === 0 || base.round === round ? base.opponents : {};
+        const ownTeam = duelState.teams.find((team) =>
+            playersOf(team).some((player) => player?.playerId === duel.selfId));
+
+        const opponents = Object.fromEntries(
+            duelState.teams
+                .filter((team) => team !== ownTeam)
+                .flatMap(playersOf)
+                .filter((player) => typeof player?.playerId === "string")
+                .map((player) => [player.playerId, opponentFromPlayer(player, previous[player.playerId], round)]),
+        );
+
+        return { gameId: duelState.gameId, selfId: duel.selfId, round, opponents };
+    }
+
+    function opponentStatus({ pin, guess }) {
+        if (guess === HIDDEN_GUESS) return "guessed";
+        if (guess) return "guess";
+        return pin ? "pin" : "waiting";
+    }
+
+    // Pure read of the round answer: getCurrentCoord can scan the page and report a new
+    // location, which must not happen while a view is being computed.
+    function roundAnswer() {
+        return state.current || state.locations[state.locations.length - 1] || null;
+    }
+
+    // The one shape the map overlay and the opponent telemetry both read. The score
+    // inverts the curve nearbyCoord aims along.
+    function opponentView() {
+        const answer = roundAnswer();
+        const scale = state.mapScale || 1492;
+
+        return {
+            round: state.duel.round,
+            opponents: Object.entries(state.duel.opponents).map(([playerId, opponent]) => {
+                const status = opponentStatus(opponent);
+                const coord = { guess: opponent.guess, pin: opponent.pin }[status] || null;
+                const km = coord && isCoord(answer)
+                    ? distanceKm(answer.lat, answer.lng, coord.lat, coord.lng)
+                    : null;
+
+                return {
+                    playerId,
+                    status,
+                    lat: coord ? coord.lat : null,
+                    lng: coord ? coord.lng : null,
+                    distanceKm: km,
+                    score: km === null ? null : Math.round(5000 * Math.exp(-km / scale)),
+                };
+            }),
+        };
+    }
+
+    // Samples arrive every ~256 ms and mostly repeat the last pin, so only a changed view
+    // is worth drawing or sending. The key starts empty so each page load's first publish
+    // posts, even an empty view, and clears the dashboard's previous opponent snapshot.
+    let lastOpponentKey = "";
+    function publishOpponents() {
+        const view = opponentView();
+        const key = JSON.stringify(view);
+        if (key === lastOpponentKey) return;
+
+        lastOpponentKey = key;
+        shownOpponents = view.opponents;
+        broadcastOpponents(view);
+        if (document.body) updateMapFrame(roundAnswer());
+    }
+
+    function commitDuel(duel) {
+        if (duel === state.duel) return;
+        state.duel = duel;
+        publishOpponents();
+    }
+
+    function parseGameFrame(text) {
+        try {
+            const frame = JSON.parse(text);
+            return frame && typeof frame === "object" ? frame : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function handleGameSend(text) {
+        const frame = parseGameFrame(text);
+        if (frame) commitDuel(withSelf(state.duel, frame));
+    }
+
+    function handleGameFrame(text) {
+        const frame = parseGameFrame(text);
+        if (!frame) return;
+
+        if (frame.code === "LiveStreamSamples") {
+            commitDuel(withLiveSamples(state.duel, frame));
+            return;
+        }
+
+        const duelState = frame.duel && frame.duel.state;
+        if (!duelState || (frame.gameId && frame.gameId !== duelState.gameId)) return;
+        commitDuel(withDuelState(state.duel, duelState));
+    }
+
     window.__pnjHandlers = {
         googleText: inspectGoogleMapsText,
         jsonText: inspectText,
         jsonObject: (object, url) => rememberLocations(collectCoords(object, url)),
+        gameFrame: (text) => handleGameFrame(text),
+        gameSend: (text) => handleGameSend(text),
     };
 
     const patchedGlobals = (window.__pnjPatched = window.__pnjPatched || new WeakSet());
@@ -776,8 +1115,57 @@
         patchedGlobals.add(window.fetch);
     }
 
+    function isGameServerUrl(url) {
+        try {
+            return GAME_SERVER_HOST.test(new URL(String(url), location.href).hostname);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function observeGameSocket(socket) {
+        socket.addEventListener("message", (event) => {
+            const data = event.data;
+            if (typeof data !== "string" || data[0] !== "{") return;
+            try {
+                window.__pnjHandlers.gameFrame(data);
+            } catch (e) { }
+        });
+
+        socket.send = new Proxy(socket.send, {
+            apply(target, thisArg, args) {
+                const data = args[0];
+                if (typeof data === "string" && data[0] === "{") {
+                    try {
+                        window.__pnjHandlers.gameSend(data);
+                    } catch (e) { }
+                }
+                return Reflect.apply(target, thisArg, args);
+            }
+        });
+    }
+
+    // With any @grant the script's `window` is a sandbox, while the game opens its socket
+    // through the page's own constructor, so that is the one to wrap.
+    function patchWebSocket() {
+        const pageWindow = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+        if (typeof pageWindow.WebSocket !== "function" || patchedGlobals.has(pageWindow.WebSocket)) return;
+
+        pageWindow.WebSocket = new Proxy(pageWindow.WebSocket, {
+            construct(target, args, newTarget) {
+                const socket = Reflect.construct(target, args, newTarget);
+                try {
+                    if (isGameServerUrl(args[0])) observeGameSocket(socket);
+                } catch (e) { }
+                return socket;
+            }
+        });
+        patchedGlobals.add(pageWindow.WebSocket);
+    }
+
     patchXhr();
     patchFetch();
+    patchWebSocket();
 
     window.addEventListener("pnj_loc_upd", (e) => {
         if (e && e.detail) rememberLocation(e.detail);
@@ -1100,7 +1488,7 @@
                                 display: none !important;
                             }
                             .pnj-mapcn-marker {
-                                position: relative;
+                                position: absolute;
                                 width: 18px;
                                 height: 18px;
                                 display: flex;
@@ -1130,6 +1518,52 @@
                                     transform: scale(2.2);
                                     opacity: 0;
                                 }
+                            }
+                            .pnj-opp-marker {
+                                position: absolute;
+                                width: 18px;
+                                height: 18px;
+                                display: flex;
+                                align-items: center;
+                                justify-content: center;
+                            }
+                            .pnj-opp-dot {
+                                width: 14px;
+                                height: 14px;
+                                border-radius: 50%;
+                                background: #3b82f6;
+                                border: 2.5px solid #fff;
+                                box-shadow: 0 0 10px rgba(59, 130, 246, .9);
+                            }
+                            .pnj-opp-chip,
+                            .pnj-opp-note {
+                                padding: 2px 7px;
+                                border-radius: 999px;
+                                background: rgba(24, 6, 68, .88);
+                                color: #fff;
+                                font: 800 10px/1.3 var(--gg-font);
+                                white-space: nowrap;
+                                pointer-events: none;
+                            }
+                            .pnj-opp-chip {
+                                position: absolute;
+                                bottom: calc(100% + 3px);
+                                left: 50%;
+                                transform: translateX(-50%);
+                            }
+                            #pnj-map-notes {
+                                position: absolute;
+                                top: 6px;
+                                left: 6px;
+                                z-index: 2;
+                                display: flex;
+                                flex-direction: column;
+                                align-items: flex-start;
+                                gap: 4px;
+                                pointer-events: none;
+                            }
+                            #pnj-map-notes[hidden] {
+                                display: none;
                             }
                             .pnj-copyright {
                                 padding: 8px 0 4px;
@@ -1170,6 +1604,7 @@
 
                             <div id="pnj-map-panel" class="pnj-map-card" hidden>
                                 <div id="pnj-map-container"></div>
+                                <div id="pnj-map-notes" hidden></div>
                             </div>
 
                             <footer class="pnj-copyright">©<span id="pnj-copyright-year">${new Date().getFullYear()}</span></footer>
@@ -1370,7 +1805,7 @@
         });
 
         const currentCoord = getCurrentCoord();
-        if (currentCoord) updateMapFrame(currentCoord);
+        if (currentCoord || shownOpponents.length) updateMapFrame(currentCoord);
     }
 
     function findBtnPartial(keywords) {
@@ -1420,6 +1855,10 @@
             roundOverSeen = false;
             resetRoundLock();
             state.mapScale = null;
+            // A duel URL carries its gameId, so moving within the same duel keeps its state.
+            if (!state.duel.gameId || !location.pathname.includes(state.duel.gameId)) {
+                commitDuel(emptyDuel(state.duel.selfId));
+            }
         }
 
         if (!state.autoBot) return;
