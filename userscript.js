@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PNJ GeoGuessr Tools
 // @namespace    http://tampermonkey.net/
-// @version      7.8
+// @version      7.9
 // @description  Full-featured GeoGuessr helper.
 // @author       Peenjeee
 // @match        https://www.geoguessr.com/*
@@ -24,7 +24,7 @@
 (function () {
     'use strict';
 
-    console.log("PNJ GeoGuessr Userscript v7.8 Loaded!");
+    console.log("PNJ GeoGuessr Userscript v7.9 Loaded!");
 
     try {
         localStorage.removeItem("pnj_rnd_loc");
@@ -404,19 +404,37 @@
         broadcastToWeb(coord);
     }
 
-    // mapcn (mapcn.dev) is React-only, but it is a thin layer over MapLibre GL + free CARTO
-    // basemaps with light/dark switching — that is what we reproduce here in plain JS.
-    const MAPCN_STYLES = {
-        light: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
-        dark: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+    // The same map as the extension's tilemap.js: Google's roadmap tiles, its zoom levels and
+    // its pins. The tiles are only sharp at whole zoom levels, so every fit lands on one.
+    const GOOGLE_TILES_STYLE = {
+        version: 8,
+        sources: {
+            google: {
+                type: "raster",
+                tiles: [0, 1, 2, 3].map((n) => `https://mt${n}.google.com/vt/lyrs=m&hl=en&x={x}&y={y}&z={z}`),
+                tileSize: 256,
+                maxzoom: 18,
+            },
+        },
+        layers: [
+            { id: "background", type: "background", paint: { "background-color": "#e5e3df" } },
+            { id: "google", type: "raster", source: "google" },
+        ],
     };
+    const SINGLE_MARKER_ZOOM = 6;
+    const MAX_FIT_ZOOM = 12;
+    const FIT_PADDING = 40;
+    const PIN_COLORS = { answer: "#e53935", opponent: "#1e6bff" };
+    const PIN_SVG = (color) => `<svg viewBox="0 0 28 40" width="28" height="40">` +
+        `<path d="M14 1C6.8 1 1 6.7 1 13.8 1 23.6 14 39 14 39s13-15.4 13-25.2C27 6.7 21.2 1 14 1z" fill="${color}" stroke="#ffffff" stroke-width="2"/>` +
+        `<circle cx="14" cy="14" r="4.5" fill="#ffffff"/></svg>`;
 
     let maplibreMap = null;
     let maplibreMarker = null;
     let maplibreCssReady = false;
 
     // Opponents the last published view put on the map, keyed by playerId. The status
-    // decides how an opponent is drawn: a dot with a label chip, or a one-line note when
+    // decides how an opponent is drawn: a pin with a label chip, or a one-line note when
     // the server withholds the coordinates.
     const OPPONENT_MARKER_KIND = { pin: "Pin", guess: "Guess" };
     const OPPONENT_NOTE = {
@@ -460,31 +478,24 @@
         }
     }
 
-    function mapcnStyleUrl() {
-        const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
-        return prefersDark ? MAPCN_STYLES.dark : MAPCN_STYLES.light;
-    }
-
-    function createMapcnMarker() {
-        const el = document.createElement("div");
-        el.className = "pnj-mapcn-marker";
-        el.innerHTML = `
-                        <div class="pnj-mapcn-ping"></div>
-                        <div class="pnj-mapcn-dot"></div>
-                    `;
-        return el;
+    // A teardrop whose tip marks the coordinate, so its marker anchors at the bottom.
+    function createPinElement(className, color) {
+        const element = document.createElement("div");
+        element.className = className;
+        const graphic = document.createElement("div");
+        graphic.className = "pnj-pin-graphic";
+        graphic.innerHTML = PIN_SVG(color);
+        element.append(graphic);
+        return element;
     }
 
     function createOpponentMarker(gl, opponent) {
-        const element = document.createElement("div");
-        element.className = "pnj-opp-marker";
-        const dot = document.createElement("div");
-        dot.className = "pnj-opp-dot";
+        const element = createPinElement("pnj-opp-marker", PIN_COLORS.opponent);
         const chip = document.createElement("div");
         chip.className = "pnj-opp-chip";
-        element.append(dot, chip);
+        element.append(chip);
 
-        const marker = new gl.Marker({ element, anchor: "center" })
+        const marker = new gl.Marker({ element, anchor: "bottom" })
             .setLngLat([opponent.lng, opponent.lat])
             .addTo(maplibreMap);
         return { marker, chip };
@@ -531,7 +542,8 @@
 
     function fitMarkers(bounds) {
         framedBounds = bounds;
-        maplibreMap.fitBounds(bounds, { padding: 40, maxZoom: 7, animate: false });
+        const camera = maplibreMap.cameraForBounds(bounds, { padding: FIT_PADDING, maxZoom: MAX_FIT_ZOOM });
+        if (camera) maplibreMap.jumpTo({ ...camera, zoom: Math.floor(camera.zoom) });
     }
 
     // A hidden card can measure zero-size, in which case a fit fails silently, so the
@@ -546,9 +558,9 @@
         try {
             maplibreMap = new gl.Map({
                 container,
-                style: mapcnStyleUrl(),
+                style: GOOGLE_TILES_STYLE,
                 center: [center.lng, center.lat],
-                zoom: 7,
+                zoom: SINGLE_MARKER_ZOOM,
                 attributionControl: false,
             });
         } catch (e) {
@@ -569,7 +581,7 @@
             maplibreMarker.setLngLat([answer.lng, answer.lat]);
             return;
         }
-        maplibreMarker = new gl.Marker({ element: createMapcnMarker(), anchor: "center" })
+        maplibreMarker = new gl.Marker({ element: createPinElement("pnj-answer-marker", PIN_COLORS.answer), anchor: "bottom" })
             .setLngLat([answer.lng, answer.lat])
             .addTo(maplibreMap);
     }
@@ -638,7 +650,7 @@
             framedBounds = null;
             // One synchronous camera update avoids two render passes from setCenter +
             // setZoom. A map created on the answer is already framed.
-            if (!created) maplibreMap.jumpTo({ center: [answer.lng, answer.lat], zoom: 7 });
+            if (!created) maplibreMap.jumpTo({ center: [answer.lng, answer.lat], zoom: SINGLE_MARKER_ZOOM });
         }
         // Only resize when the map has just become visible.
         if (!created && wasHidden) requestAnimationFrame(resizeMap);
@@ -1488,55 +1500,34 @@
                             .maplibregl-compact {
                                 display: none !important;
                             }
-                            .pnj-mapcn-marker {
-                                position: absolute;
-                                width: 18px;
-                                height: 18px;
-                                display: flex;
-                                align-items: center;
-                                justify-content: center;
-                            }
-                            .pnj-mapcn-ping {
-                                position: absolute;
-                                width: 100%;
-                                height: 100%;
-                                border-radius: 50%;
-                                background: #ff416d;
-                                opacity: .75;
-                                animation: pnjMapcnPing 1.5s cubic-bezier(0, 0, .2, 1) infinite;
-                            }
-                            .pnj-mapcn-dot {
-                                position: relative;
-                                width: 14px;
-                                height: 14px;
-                                border-radius: 50%;
-                                background: #ff416d;
-                                border: 2.5px solid #fff;
-                                box-shadow: 0 0 10px rgba(255, 65, 109, .9);
-                            }
-                            @keyframes pnjMapcnPing {
-                                75%, 100% {
-                                    transform: scale(2.2);
-                                    opacity: 0;
-                                }
-                            }
+                            .pnj-answer-marker,
                             .pnj-opp-marker {
                                 position: absolute;
-                                width: 18px;
-                                height: 18px;
-                                display: flex;
-                                align-items: center;
-                                justify-content: center;
+                                width: 28px;
+                                height: 40px;
+                                pointer-events: none;
                             }
-                            .pnj-opp-dot {
-                                width: 14px;
-                                height: 14px;
-                                border-radius: 50%;
-                                background: #3b82f6;
-                                border: 2.5px solid #fff;
-                                box-shadow: 0 0 10px rgba(59, 130, 246, .9);
+                            .pnj-answer-marker {
+                                z-index: 2;
                             }
-                            .pnj-opp-chip,
+                            .pnj-pin-graphic svg {
+                                display: block;
+                                overflow: visible;
+                                filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .45));
+                            }
+                            .pnj-opp-chip {
+                                position: absolute;
+                                bottom: 42px;
+                                left: 50%;
+                                transform: translateX(-50%);
+                                padding: 3px 7px;
+                                border-radius: 10px;
+                                background: #1e6bff;
+                                color: #fff;
+                                font: 600 11px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+                                white-space: nowrap;
+                                box-shadow: 0 1px 3px rgba(0, 0, 0, .4);
+                            }
                             .pnj-opp-note {
                                 padding: 2px 7px;
                                 border-radius: 999px;
@@ -1546,11 +1537,17 @@
                                 white-space: nowrap;
                                 pointer-events: none;
                             }
-                            .pnj-opp-chip {
+                            .pnj-map-attrib {
                                 position: absolute;
-                                bottom: calc(100% + 3px);
-                                left: 50%;
-                                transform: translateX(-50%);
+                                right: 0;
+                                bottom: 0;
+                                z-index: 2;
+                                padding: 1px 4px;
+                                border-top-left-radius: 4px;
+                                background: rgba(255, 255, 255, .7);
+                                color: #444;
+                                font: 10px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+                                pointer-events: none;
                             }
                             #pnj-map-notes {
                                 position: absolute;
@@ -1606,6 +1603,7 @@
                             <div id="pnj-map-panel" class="pnj-map-card" hidden>
                                 <div id="pnj-map-container"></div>
                                 <div id="pnj-map-notes" hidden></div>
+                                <div class="pnj-map-attrib">Map data ©Google</div>
                             </div>
 
                             <footer class="pnj-copyright">©<span id="pnj-copyright-year">${new Date().getFullYear()}</span></footer>
